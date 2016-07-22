@@ -13,6 +13,7 @@ from desispec.linalg import cholesky_solve
 from desispec.linalg import cholesky_solve_and_invert
 from desispec.linalg import spline_fit
 from desispec.maskbits import specmask
+from desispec import util
 import scipy,scipy.sparse
 import sys
 from desispec.log import get_logger
@@ -432,7 +433,7 @@ class FiberFlat(object):
             ivar: 2D[nspec, nwave] inverse variance of fiberflat
             
         Optional inputs:
-            mask: 2D[nspec, nwave] mask where 0=good; default ivar==0
+            mask: 2D[nspec, nwave] mask where 0=good; default ivar==0; 32-bit
             meanspec: (optional) 1D[nwave] mean deconvolved average flat lamp spectrum
             chi2pdf: (optional) Normalized chi^2 for fit to mean spectrum
             header: (optional) FITS header from HDU0
@@ -475,13 +476,20 @@ class FiberFlat(object):
         self.wave = wave
         self.fiberflat = fiberflat
         self.ivar = ivar
-        self.mask = mask
+        self.mask = util.mask32(mask)
         self.meanspec = meanspec
-        self.chi2pdf = chi2pdf
 
         self.nspec, self.nwave = self.fiberflat.shape
         self.header = header
-        
+
+        if chi2pdf is not None:
+            self.chi2pdf = chi2pdf
+        else:
+            try:
+                self.chi2pdf = header['chi2pdf']
+            except (KeyError, TypeError):
+                self.chi2pdf = None
+
         self.spectrograph = spectrograph
         if fibers is None:
             self.fibers = self.spectrograph + np.arange(self.nspec, dtype=int)
@@ -512,7 +520,7 @@ class FiberFlat(object):
     def __repr__(self):
         """ Print formatting
         """
-        return ('{:s}: nspec={:d}, spectrograph={:s}'.format(
+        return ('{:s}: nspec={:d}, spectrograph={:d}'.format(
                 self.__class__.__name__, self.nspec, self.spectrograph))
 
 
@@ -539,7 +547,10 @@ def qa_fiberflat(param, frame, fiberflat):
         log.warn("Low counts in meanspec = {:g}".format(qadict['MAX_MEANSPEC']))
 
     # Record chi2pdf
-    qadict['CHI2PDF'] = float(fiberflat.chi2pdf)
+    try:
+        qadict['CHI2PDF'] = float(fiberflat.chi2pdf)
+    except TypeError:
+        qadict['CHI2PDF'] = 0.
 
     # N mask
     qadict['N_MASK'] = int(np.sum(fiberflat.mask > 0))

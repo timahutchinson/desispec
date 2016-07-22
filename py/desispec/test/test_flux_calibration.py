@@ -182,7 +182,7 @@ class TestFluxCalibration(unittest.TestCase):
         frame.fibermap['OBJTYPE'][stdfibers] = 'STD'
         input_model_wave=modelwave
         input_model_flux=modelflux[0:3] # assuming the first three to be best models,3 is exclusive here
-        fluxCalib, _ =compute_flux_calibration(frame, input_model_wave,input_model_flux,nsig_clipping=4.)
+        fluxCalib =compute_flux_calibration(frame, input_model_wave,input_model_flux,nsig_clipping=4.)
         # assert the output
         self.assertTrue(np.array_equal(fluxCalib.wave, frame.wave))
         self.assertEqual(fluxCalib.calib.shape,frame.flux.shape)
@@ -198,7 +198,7 @@ class TestFluxCalibration(unittest.TestCase):
         frame.fibermap['OBJTYPE'][0:nstd] = 'STD'
         nstd = np.count_nonzero(frame.fibermap['OBJTYPE'] == 'STD')
         frame.flux[0] = np.mean(frame.flux[0])
-        fluxCalib, _ = compute_flux_calibration(frame, modelwave, modelflux[0:nstd])
+        fluxCalib = compute_flux_calibration(frame, modelwave, modelflux[0:nstd])
 
     def test_masked_data(self):
         """Test compute_fluxcalibration with some ivar=0 data
@@ -209,7 +209,7 @@ class TestFluxCalibration(unittest.TestCase):
         frame.fibermap['OBJTYPE'][2:2+nstd] = 'STD'
         frame.ivar[2:2+nstd, 20:22] = 0
         
-        fluxCalib, _ = compute_flux_calibration(frame, modelwave, modelflux[2:2+nstd], debug=True)
+        fluxCalib = compute_flux_calibration(frame, modelwave, modelflux[2:2+nstd], debug=True)
         self.assertTrue(np.array_equal(fluxCalib.wave, frame.wave))
         self.assertEqual(fluxCalib.calib.shape,frame.flux.shape)
 
@@ -224,7 +224,7 @@ class TestFluxCalibration(unittest.TestCase):
 
         #define fluxcalib object
         calib = np.ones_like(origframe.flux)
-        mask = np.zeros_like(origframe.flux)
+        mask = np.zeros(origframe.flux.shape, dtype=np.uint32)
         calib[0] *= 0.5
         calib[1] *= 1.5
 
@@ -238,7 +238,7 @@ class TestFluxCalibration(unittest.TestCase):
         # origframe.flux=0 should result in frame.flux=0
         fcivar = np.ones_like(origframe.flux)
         calib = np.ones_like(origframe.flux)
-        fc = FluxCalib(origframe.wave, calib, fcivar,mask)
+        fc = FluxCalib(origframe.wave, calib, fcivar, mask)
         frame = copy.deepcopy(origframe)
         frame.flux[0,0:10]=0.0
         apply_flux_calibration(frame, fc)
@@ -267,7 +267,7 @@ class TestFluxCalibration(unittest.TestCase):
         frame=copy.deepcopy(origframe)
         calib = np.ones_like(frame.flux)
         fcivar=np.ones_like(frame.ivar)
-        mask=np.zeros_like(origframe.flux)
+        mask=np.zeros(origframe.flux.shape, dtype=np.uint32)
         fc=FluxCalib(origframe.wave+0.01,calib,fcivar,mask)
         with self.assertRaises(SystemExit):  #should be ValueError instead?
             apply_flux_calibration(frame,fc)

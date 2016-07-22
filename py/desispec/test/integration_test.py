@@ -8,27 +8,39 @@ import sys
 import os
 import random
 import time
+import subprocess as sp
+import glob
 
 import numpy as np
 from astropy.io import fits
 
+<<<<<<< HEAD
 from desispec.pipeline import runcmd
 from desispec import io
 from desispec.qa import QA_Exposure
 from desispec.log import get_logger
+=======
+import desispec.pipeline as pipe
+import desispec.io as io
+import desispec.log as logging
+
+import desispec.scripts.makebricks as makebricks
+
+>>>>>>> b88c9f07c55add8768921408b91ea6337c9a25f2
 
 #- prevent nose from trying to run this test since it takes too long
 __test__ = False
+
 
 def check_env():
     """
     Check required environment variables; raise RuntimeException if missing
     """
-    log = get_logger()
+    log = logging.get_logger()
     #- template locations
     missing_env = False
     if 'DESI_BASIS_TEMPLATES' not in os.environ:
-        log.warning('missing $DESI_BASIS_TEMPLATES needed for simulating spectra')
+        log.warning('missing $DESI_BASIS_TEMPLATES needed for simulating spectra'.format(name))
         missing_env = True
 
     if not os.path.isdir(os.getenv('DESI_BASIS_TEMPLATES')):
@@ -37,7 +49,7 @@ def check_env():
         missing_env = True
 
     for name in (
-        'DESI_SPECTRO_SIM', 'DESI_SPECTRO_REDUX', 'PIXPROD', 'PRODNAME'):
+        'DESI_SPECTRO_SIM', 'DESI_SPECTRO_REDUX', 'PIXPROD', 'SPECPROD', 'DESIMODEL'):
         if name not in os.environ:
             log.warning("missing ${0}".format(name))
             missing_env = True
@@ -46,7 +58,7 @@ def check_env():
         log.warning("Why are these needed?")
         log.warning("    Simulations written to $DESI_SPECTRO_SIM/$PIXPROD/")
         log.warning("    Raw data read from $DESI_SPECTRO_DATA/")
-        log.warning("    Spectro pipeline output written to $DESI_SPECTRO_REDUX/$PRODNAME/")
+        log.warning("    Spectro pipeline output written to $DESI_SPECTRO_REDUX/$SPECPROD/")
         log.warning("    Templates are read from $DESI_BASIS_TEMPLATES")
 
     #- Wait until end to raise exception so that we report everything that
@@ -59,55 +71,54 @@ def check_env():
     os.environ['DESI_SPECTRO_DATA'] = os.path.join(os.getenv('DESI_SPECTRO_SIM'), os.getenv('PIXPROD'))
 
 
-#- TODO: fix usage of night to be something other than today
-def integration_test(night=None, nspec=5, clobber=False):
-    """Run an integration test from raw data simulations through redshifts
-    
+# Simulate raw data
+
+def sim(night, nspec=5, clobber=False):
+    """
+    Simulate data as part of the integration test.
+
     Args:
-        night (str, optional): YEARMMDD, defaults to current night
+        night (str): YEARMMDD
         nspec (int, optional): number of spectra to include
         clobber (bool, optional): rerun steps even if outputs already exist
         
     Raises:
         RuntimeError if any script fails
-      
     """
-    log = get_logger()
-    #- YEARMMDD string, rolls over at noon not midnight
-    if night is None:
-        night = time.strftime('%Y%m%d', time.localtime(time.time()-12*3600))
+    log = logging.get_logger()
 
-    #- check for required environment variables
-    check_env()
+    # Create input fibermaps, spectra, and pixel-level raw data
 
-    #- parameter dictionary that will later be used for formatting commands
-    params = dict(night=night, nspec=nspec)
-
+<<<<<<< HEAD
     #-----
     #- Input fibermaps, spectra, and pixel-level raw data
     raw_dict = {0: 'flat', 1: 'arc', 2: 'dark'}
     #for expid, flavor in zip([0,1,2], ['flat', 'arc', 'dark']):
     for expid, flavor in raw_dict.items():
+=======
+    for expid, flavor in zip([0,1,2], ['flat', 'arc', 'dark']):
+>>>>>>> b88c9f07c55add8768921408b91ea6337c9a25f2
         cmd = "newexp-desi --flavor {flavor} --nspec {nspec} --night {night} --expid {expid}".format(
-            expid=expid, flavor=flavor, **params)
+            expid=expid, flavor=flavor, nspec=nspec, night=night)
         fibermap = io.findfile('fibermap', night, expid)
         simspec = '{}/simspec-{:08d}.fits'.format(os.path.dirname(fibermap), expid)
         inputs = []
         outputs = [fibermap, simspec]
-        if runcmd(cmd, inputs, outputs, clobber) != 0:
+        if pipe.runcmd(cmd, inputs=inputs, outputs=outputs, clobber=clobber) != 0:
             raise RuntimeError('pixsim newexp failed for {} exposure {}'.format(flavor, expid))
 
-        cmd = "pixsim-desi --preproc --nspec {nspec} --night {night} --expid {expid}".format(expid=expid, **params)
+        cmd = "pixsim-desi --preproc --nspec {nspec} --night {night} --expid {expid}".format(expid=expid, nspec=nspec, night=night)
         inputs = [fibermap, simspec]
         outputs = list()
         outputs.append(fibermap.replace('fibermap-', 'simpix-'))
         for camera in ['b0', 'r0', 'z0']:
             pixfile = io.findfile('pix', night, expid, camera)
             outputs.append(pixfile)
-            # outputs.append(os.path.join(os.path.dirname(pixfile), os.path.basename(pixfile).replace('pix-', 'simpix-')))
-        if runcmd(cmd, inputs, outputs, clobber) != 0:
+            #outputs.append(os.path.join(os.path.dirname(pixfile), os.path.basename(pixfile).replace('pix-', 'simpix-')))
+        if pipe.runcmd(cmd, inputs=inputs, outputs=outputs, clobber=clobber) != 0:
             raise RuntimeError('pixsim failed for {} exposure {}'.format(flavor, expid))
 
+<<<<<<< HEAD
     #-----
     #- Extract
 
@@ -253,50 +264,117 @@ def integration_test(night=None, nspec=5, clobber=False):
     for b in bricks:
         for channel in ['b', 'r', 'z']:
             outputs.append( io.findfile('brick', brickname=b, band=channel))
+=======
+    return
+>>>>>>> b88c9f07c55add8768921408b91ea6337c9a25f2
 
-    cmd = "desi_make_bricks --night "+night
-    if runcmd(cmd, inputs, outputs, clobber) != 0:
-        raise RuntimeError('brick generation failed')
 
-    #-----
-    #- Redshifts!
-    for b in bricks:
-        inputs = [io.findfile('brick', brickname=b, band=channel) for channel in ['b', 'r', 'z']]
-        zbestfile = io.findfile('zbest', brickname=b)
-        outputs = [zbestfile, ]
-        cmd = "desi_zfind --brick {} -o {}".format(b, zbestfile)
-        if runcmd(cmd, inputs, outputs, clobber) != 0:
-            raise RuntimeError('redshifts failed for brick '+b)
-    # ztruth QA
-    qafile = io.findfile('qa_ztruth', night)
-    qafig = io.findfile('qa_ztruth_fig', night)
-    cmd = "desi_qa_zfind --night {night} --qafile {qafile} --qafig {qafig} --verbose".format(
-        night=night, qafile=qafile, qafig=qafig)
-    inputs = []
-    outputs = [qafile, qafig]
-    if runcmd(cmd, inputs, outputs, clobber) != 0:
-        raise RuntimeError('redshift QA failed for night '+night)
+def integration_test(night=None, nspec=5, clobber=False):
+    """Run an integration test from raw data simulations through redshifts
+    
+    Args:
+        night (str, optional): YEARMMDD, defaults to current night
+        nspec (int, optional): number of spectra to include
+        clobber (bool, optional): rerun steps even if outputs already exist
+        
+    Raises:
+        RuntimeError if any script fails
+      
+    """
+    log = logging.get_logger()
+    log.setLevel(logging.DEBUG)
 
-    #-----
-    #- Did it work?
-    #- (this combination of fibermap, simspec, and zbest is a pain)
-    simdir = os.path.dirname(io.findfile('fibermap', night=night, expid=expid))
+    # YEARMMDD string, rolls over at noon not midnight
+    # TODO: fix usage of night to be something other than today
+    if night is None:
+        #night = time.strftime('%Y%m%d', time.localtime(time.time()-12*3600))
+        night = "20160726"
+
+    # check for required environment variables
+    check_env()
+
+    # simulate inputs
+    sim(night, nspec=nspec, clobber=clobber)
+
+    # create production
+
+    # FIXME:  someday run PSF estimation too...
+    ### com = "desi_pipe --env env.txt --spectrographs 0 --fakeboot --fakepsf"
+    rawdir = os.path.join(os.getenv('DESI_SPECTRO_SIM'), os.getenv('PIXPROD'))    
+    com = "desi_pipe --spectrographs 0 --fakeboot --fakepsf --raw {}".format(rawdir)
+    sp.check_call(com, shell=True)
+
+    # raw and production locations
+
+    rawdir = os.path.abspath(io.rawdata_root())
+    proddir = os.path.abspath(io.specprod_root())
+
+    # Modify options file to restrict the spectral range
+
+    optpath = os.path.join(proddir, "run", "options.yaml")
+    opts = pipe.read_options(optpath)
+    opts['extract']['specmin'] = 0
+    opts['extract']['nspec'] = nspec
+    pipe.write_options(optpath, opts)
+
+    # run the generated shell scripts
+
+    # FIXME:  someday run PSF estimation too...
+
+    # print("Running bootcalib script...")
+    # com = os.path.join(proddir, "run", "scripts", "bootcalib_all.sh")
+    # sp.check_call(["bash", com])
+
+    # print("Running specex script...")
+    # com = os.path.join(proddir, "run", "scripts", "specex_all.sh")
+    # sp.check_call(["bash", com])
+
+    # print("Running psfcombine script...")
+    # com = os.path.join(proddir, "run", "scripts", "psfcombine_all.sh")
+    # sp.check_call(["bash", com])
+
+    com = os.path.join(proddir, "run", "scripts", "extract_all.sh")
+    print("Running extraction script "+com)
+    sp.check_call(["bash", com])
+
+    com = os.path.join(proddir, "run", "scripts", "fiberflat-procexp_all.sh")
+    print("Running calibration script "+com)
+    sp.check_call(["bash", com])
+
+    com = os.path.join(proddir, "run", "scripts", "bricks.sh")
+    print("Running makebricks script "+com)
+    sp.check_call(["bash", com])
+
+    com = os.path.join(proddir, "run", "scripts", "zfind_all.sh")
+    print("Running zfind script "+com)
+    sp.check_call(["bash", com])
+
+    # #-----
+    # #- Did it work?
+    # #- (this combination of fibermap, simspec, and zbest is a pain)
+    expid = 2
+    fmfile = io.findfile('fibermap', night=night, expid=expid)
+    fibermap = io.read_fibermap(fmfile)
+    simdir = os.path.dirname(fmfile)
     simspec = '{}/simspec-{:08d}.fits'.format(simdir, expid)
     siminfo = fits.getdata(simspec, 'METADATA')
+
+    brickdirs = glob.glob(os.path.join(proddir, "bricks", "*"))
+    bricks = [ os.path.basename(x) for x in brickdirs ]
 
     print()
     print("--------------------------------------------------")
     print("Brick     True  z        ->  Class  z        zwarn")
     # print("3338p190  SKY   0.00000  ->  QSO    1.60853   12   - ok")
     for b in bricks:
-        zbest = io.read_zbest(io.findfile('zbest', brickname=b))
+        zbest = io.read_zbest(io.findfile('zbest', brickname=b))        
         for i in range(len(zbest.z)):
-            if zbest.type[i] == 'ssp_em_galaxy':
+            if zbest.spectype[i] == 'ssp_em_galaxy':
                 objtype = 'GAL'
-            elif zbest.type[i] == 'spEigenStar':
+            elif zbest.spectype[i] == 'spEigenStar':
                 objtype = 'STAR'
             else:
-                objtype = zbest.type[i]
+                objtype = zbest.spectype[i]
 
             z, zwarn = zbest.z[i], zbest.zwarn[i]
 
@@ -323,6 +401,9 @@ def integration_test(night=None, nspec=5, clobber=False):
                 b, truetype, truez, objtype, z, zwarn, status))
 
     print("--------------------------------------------------")
+
+
+
 
 if __name__ == '__main__':
     integration_test()

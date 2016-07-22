@@ -9,6 +9,8 @@ import os.path
 from astropy.io import fits
 import numpy as np
 
+from desiutil.depend import add_dependencies
+
 import desispec.io.util
 import desispec.preproc
 from desispec.log import get_logger
@@ -57,7 +59,7 @@ def write_raw(filename, rawdata, header, camera=None, primary_header=None):
             CCDSECx, BIASSECx, DATASECx where x=1,2,3, or 4
 
     Options:
-        camera : B0, R1 .. Z9 - override value in header
+        camera : b0, r1 .. z9 - override value in header
         primary_header : header to write in HDU0 if filename doesn't yet exist
 
     The primary utility of this function over raw fits calls is to ensure
@@ -112,9 +114,12 @@ def write_raw(filename, rawdata, header, camera=None, primary_header=None):
 
     #- Set EXTNAME=camera
     if camera is not None:
-        header['CAMERA'] = camera
+        header['CAMERA'] = camera.lower()
         extname = camera.upper()
     else:
+        if header['CAMERA'] != header['CAMERA'].lower():
+            log.warn('Converting CAMERA {} to lowercase'.format(header['CAMERA']))
+            header['CAMERA'] = header['CAMERA'].lower()
         extname = header['CAMERA'].upper()
 
     header['INHERIT'] = True
@@ -151,6 +156,7 @@ def write_raw(filename, rawdata, header, camera=None, primary_header=None):
             hdus.close()
     else:
         hdus = fits.HDUList()
+        add_dependencies(primary_header)
         hdus.append(fits.PrimaryHDU(None, header=primary_header))
         hdus.append(dataHDU)
         hdus.writeto(filename)

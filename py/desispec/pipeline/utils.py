@@ -4,20 +4,26 @@
 # -*- coding: utf-8 -*-
 """
 desispec.pipeline.utils
-=====================
+=======================
 
 Utilities for the pipeline.
 """
-
 from __future__ import absolute_import, division, print_function
-
-import os
-import errno
-import sys
-import re
 
 
 def option_list(opts):
+    """Convert key, value pairs into command-line options.
+
+    Parameters
+    ----------
+    opts : dict-like
+        Convert a dictionary into command-line options.
+
+    Returns
+    -------
+    :class:`list`
+        A list of command-line options.
+    """
     optlist = []
     for key, val in opts.items():
         keystr = "--{}".format(key)
@@ -33,10 +39,3 @@ def option_list(opts):
             else:
                 optlist.append("{}".format(val))
     return optlist
-
-#- Default number of processes to use for multiprocessing
-if 'SLURM_CPUS_PER_TASK' in os.environ.keys():
-    default_nproc = int(os.environ['SLURM_CPUS_PER_TASK'])
-else:
-    import multiprocessing as _mp
-    default_nproc = max(1, _mp.cpu_count() // 2)

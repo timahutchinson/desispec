@@ -24,19 +24,29 @@ class PSF(object):
         load header, xcoeff, ycoeff from the file
         filename should have HDU1: Xcoeff, HDU2: Ycoeff
         """
-        psfdata=fits.open(filename)
+        psfdata=fits.open(filename, memmap=False)
         xcoeff=psfdata[0].data
         hdr=psfdata[0].header
         wmin=hdr['WAVEMIN']
         wmax=hdr['WAVEMAX']
         ycoeff=psfdata[1].data
         
-        #- Hardcoding based on r band, not given in header. Agh!
-        #- camera??
-        #- TODO: read this from somewhere
-        npix_x=4114 
-        npix_y=4128 
+        arm = hdr['CAMERA'].lower()[0]
+        npix_x = hdr['NPIX_X']
+        npix_y = hdr['NPIX_Y']
+        
+        # if arm=='r': 
+        #     npix_x=4114 
+        #     npix_y=4128 
+        # if arm=='b':
+        #     npix_x=4096
+        #     npix_y=4096
+        # if arm=='z':
+        #     npix_x=4114
+        #     npix_y=4128
 
+        if arm not in ['b','r','z']:
+            raise ValueError("arm not in b, r, or z. File should be of the form psfboot-r0.fits.")  
         #- Get the coeffiecients
         nspec=xcoeff.shape[0]
         ncoeff=xcoeff.shape[1]
@@ -116,8 +126,10 @@ class PSF(object):
                 fit_dictx=dufits.mk_fit_dict(self.xcoeff[ispec],self.ncoeff,'legendre',self.wmin,self.wmax)
                 x=dufits.func_val(wave,fit_dictx)
                 return np.array(x)
-    
-        if isinstance(ispec,int): #- wavelength not None but a 1D-vector here and below
+        
+        #- wavelength not None but a scalar or 1D-vector here and below
+        wavelength = np.asarray(wavelength)
+        if isinstance(ispec,int):
             fit_dictx=dufits.mk_fit_dict(self.xcoeff[ispec],self.ncoeff,'legendre',self.wmin,self.wmax)
             x=dufits.func_val(wavelength,fit_dictx)
             return np.array(x)
@@ -139,6 +151,8 @@ class PSF(object):
         """
         if wavelength is None:
             raise ValueError, "PSF.y requires wavelength 1D vector"
+            
+        wavelength = np.asarray(wavelength)
         if ispec is None:
             ispec=np.arange(self.nspec)
             y=list()

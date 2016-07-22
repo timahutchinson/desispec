@@ -12,6 +12,12 @@ import os.path
 
 import numpy as np
 
+# If we ever need to run this from a NERSC compute node, we would need
+# these lines...
+#
+#from desispec.util import set_backend
+#set_backend()
+
 import matplotlib.pyplot as plt
 
 import astropy.table
@@ -44,7 +50,7 @@ def main():
     parser.add_argument('--bands', type = str, default = 'brz',
         help = 'String listing the bands to include.')
     parser.add_argument('--specprod', type = str, default = None, metavar = 'PATH',
-        help = 'Override default path ($DESI_SPECTRO_REDUX/$PRODNAME) to processed data.')
+        help = 'Override default path ($DESI_SPECTRO_REDUX/$SPECPROD) to processed data.')
     args = parser.parse_args()
     if args.verbose:
         log = get_logger(DEBUG)

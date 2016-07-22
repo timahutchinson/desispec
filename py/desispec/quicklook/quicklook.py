@@ -9,8 +9,7 @@ from desispec.quicklook import qlheartbeat as QLHB
 
 
 def testconfig(outfilename="qlconfig.yaml"):
-
-    """ 
+    """
     Make a test Config file, should be provided by the QL framework
     Below the %% variables are replaced by actual object when the respective
     algorithm is executed.
@@ -37,7 +36,7 @@ def testconfig(outfilename="qlconfig.yaml"):
           #'PSFFile_sp':os.environ['PSFFILE_sp'], # .../desimodel/data/specpsf/psf-r.fits (for running 2d extraction)
           'basePath':os.environ['DESIMODEL'],
           'OutputFile':'lastframe_QL-r0-00000004.fits', # output file from last pipeline step. Need to output intermediate steps? Most likely after boxcar extraction?
-          'PipeLine':[{'PA':{"ModuleName":"desispec.procalgs",
+          'PipeLine':[{'PA':{"ModuleName":"desispec.quicklook.procalgs",
                              "ClassName":"BiasSubtraction",
                              "Name":"Bias Subtraction",
                              "kwargs":{"BiasImage":"%%BiasImage"}
@@ -56,7 +55,7 @@ def testconfig(outfilename="qlconfig.yaml"):
                        "StepName":"Preprocessing-Bias Subtraction",
                        "OutputFile":"QA_biassubtraction.yaml"
                        },
-                      {'PA':{"ModuleName":"desispec.procalgs",
+                      {'PA':{"ModuleName":"desispec.quicklook.procalgs",
                              "ClassName":"DarkSubtraction",
                              "Name":"Dark Subtraction",
                              "kwargs":{"DarkImage":"%%DarkImage"}
@@ -75,7 +74,7 @@ def testconfig(outfilename="qlconfig.yaml"):
                        "StepName":"Preprocessing-Dark Subtraction",
                        "OutputFile":"QA_darksubtraction.yaml"
                        },
-                      {'PA':{"ModuleName":"desispec.procalgs",
+                      {'PA':{"ModuleName":"desispec.quicklook.procalgs",
                              "ClassName":"PixelFlattening",
                              "Name":"Pixel Flattening",
                              "kwargs":{"PixelFlat":"%%PixelFlat"}
@@ -94,7 +93,7 @@ def testconfig(outfilename="qlconfig.yaml"):
                        "StepName":"Preprocessing-Pixel Flattening",
                        "OutputFile":"QA_pixelflattening.yaml"
                        },
-                      #{'PA':{"ModuleName":"desispec.procalgs",
+                      #{'PA':{"ModuleName":"desispec.quicklook.procalgs",
                       #       "ClassName":"BoxcarExtraction",
                       #       "Name":"Boxcar Extraction",
                       #       "kwargs":{"PSFFile":"%%PSFFile",
@@ -107,7 +106,7 @@ def testconfig(outfilename="qlconfig.yaml"):
                       # "StepName":"Boxcar Extration",
                       # "OutputFile":"QA_boxcarextraction.yaml"
                       # },
-                      {'PA':{"ModuleName":"desispec.procalgs",
+                      {'PA':{"ModuleName":"desispec.quicklook.procalgs",
                              "ClassName":"Extraction_2d",
                              "Name":"2D Extraction",
                              "kwargs":{"PSFFile_sp":"/home/govinda/Desi/desimodel/data/specpsf/psf-r.fits",
@@ -129,7 +128,7 @@ def testconfig(outfilename="qlconfig.yaml"):
                        "StepName":"2D Extraction",
                        "OutputFile":"qa-extract-r0-00000002.yaml"
                        },
-                      {'PA':{"ModuleName":"desispec.procalgs",
+                      {'PA':{"ModuleName":"desispec.quicklook.procalgs",
                              "ClassName": "ApplyFiberFlat",
                              "Name": "Apply Fiberflat",
                              "kwargs":{"FiberFlatFile":"%%FiberFlatFile"
@@ -139,7 +138,7 @@ def testconfig(outfilename="qlconfig.yaml"):
                        "StepName":"Apply Fiberflat",
                        "Outputfile":"apply_fiberflat_QA.yaml"
                       },
-                      {'PA':{"ModuleName":"desispec.procalgs",
+                      {'PA':{"ModuleName":"desispec.quicklook.procalgs",
                              "ClassName":"SubtractSky",
                              "Name": "Sky Subtraction",
                              "kwargs":{"SkyFile":"%%SkyFile"
@@ -157,10 +156,10 @@ def testconfig(outfilename="qlconfig.yaml"):
                              ],
                        "StepName": "Sky Subtraction",
                        "OutputFile":"qa-r0-00000002.yaml"
-                      }                       
+                      }
                       ]
           }
-    
+
     if "yaml" in outfilename:
         yaml.dump(conf,open(outfilename,"wb"))
     else:
@@ -193,10 +192,10 @@ def getobject(conf,log):
 
 def mapkeywords(kw,kwmap):
     """
-    Maps the keyword in the configuration to the corresponding object 
+    Maps the keyword in the configuration to the corresponding object
     returned by the desispec.io module.
-    e.g  Bias Image file is mapped to biasimage object... for the same keyword "BiasImage" 
-    """ 
+    e.g  Bias Image file is mapped to biasimage object... for the same keyword "BiasImage"
+    """
 
     newmap={}
     qlog=qllogger.QLLogger("QuickLook",20)
@@ -212,21 +211,19 @@ def mapkeywords(kw,kwmap):
     return newmap
 
 def runpipeline(pl,convdict,conf):
+    """runs the quicklook pipeline as configured
+
+    Args:
+        pl: is a list of [pa,qas] where pa is a pipeline step and qas the corresponding
+            qas for that pa
+        convdict: converted dictionary e.g : conf["IMAGE"] is the real psf file
+            but convdict["IMAGE"] is like desispec.image.Image object and so on.
+            details in setup_pipeline method below for examples.
+        conf: a configured dictionary, read from the configuration yaml file.
+            e.g: conf=configdict=yaml.load(open('configfile.yaml','rb'))
     """
-    runs the quicklook pipeline as configured
-    args:- pl: is a list of [pa,qas] where pa is a pipeline step and qas the cor
-responding 
-               qas for that pa
-           conf: a configured dictionary, read from the configuration yaml file.
-                 e.g: conf=configdict=yaml.load(open('configfile.yaml','rb'))
-           convdict: converted dictionary
-                 e.g : conf["IMAGE"] is the real psf file
-                       but convdict["IMAGE"] is like desispec.image.Image object
- and so on.
-                       details in setup_pipeline method below for examples.
-    """
-    
-   
+
+
     qlog=qllogger.QLLogger("QuickLook",20)
     log=qlog.getlog()
     hb=QLHB.QLHeartbeat(log,conf["Period"],conf["Timeout"])
@@ -267,11 +264,11 @@ responding
 
 def setup_pipeline(config):
     """
-       Given a configuration from QLF, this sets up a pipeline [pa,qa] and also returns a     
-       conversion dictionary from the configuration dictionary so that Pipeline steps (PA) can   
+       Given a configuration from QLF, this sets up a pipeline [pa,qa] and also returns a
+       conversion dictionary from the configuration dictionary so that Pipeline steps (PA) can
        take them. This is required for runpipeline.
     """
-       
+
     import desispec.io.fibermap as fibIO
     import desispec.io.sky as skyIO
     import desispec.io.fiberflat as ffIO
@@ -280,7 +277,7 @@ def setup_pipeline(config):
     import desispec.image as im
     import desispec.io.frame as frIO
     import desispec.frame as dframe
-    import desispec.procalgs as procalgs
+    from desispec.quicklook import procalgs
     from desispec.boxcar import do_boxcar
 
     qlog=qllogger.QLLogger("QuickLook",20)
@@ -344,7 +341,7 @@ def setup_pipeline(config):
     skyimage=None
     if "SkyFile" in config:
         skyfile=config["SkyFile"]
-    
+
     psf=None
     if "PSFFile" in config:
         #from specter.psf import load_psf
@@ -378,19 +375,19 @@ def setup_pipeline(config):
     if pixelflatfile:
         hbeat.start("Reading PixelFlat Image %s"%pixelflatfile)
         pixelflatimage=imIO.read_image(pixelflatfile)
-        convdict["PixelFlat"]=pixelflatimage     
-   
+        convdict["PixelFlat"]=pixelflatimage
+
     if fiberflatimagefile:
         hbeat.start("Reading FiberFlat Image %s"%fiberflatimagefile)
         fiberflatimage=imIO.read_image(fiberflatimagefile)
-        convdict["FiberFlatImage"]=fiberflatimage       
- 
+        convdict["FiberFlatImage"]=fiberflatimage
+
     if arclampimagefile:
         hbeat.start("Reading ArcLampImage %s"%arclampimagefile)
         arclampimage=imIO.read_image(arclampimagefile)
         convdict["ArcLampImage"]=arclampimage
 
-    if fiberflatfile: 
+    if fiberflatfile:
         hbeat.start("Reading FiberFlat %s"%fiberflatfile)
         fiberflat=ffIO.read_fiberflat(fiberflatfile)
         convdict["FiberFlatFile"]=fiberflat
@@ -419,11 +416,9 @@ def setup_pipeline(config):
         qas=[]
         for q in step["QAs"]:
             qa=getobject(q,log)
-            print qa
             if not qa.is_compatible(pa.get_output_type()):
                 log.warning("QA %s can not be used for output of %s. Skipping expecting %s got %s %s"%(qa.name,pa.name,qa.__inpType__,pa.get_output_type(),qa.is_compatible(pa.get_output_type())))
             else:
                 qas.append(qa)
         pipeline.append([pa,qas])
     return pipeline,convdict
-

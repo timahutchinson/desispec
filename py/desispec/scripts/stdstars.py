@@ -2,14 +2,6 @@
 
 """
 Get the normalized best template to do flux calibration.
-
-desi_fit_stdstars.py
-    --indir INDIR
-    --fiberflat FILENAME
-    --models STDSTAR_MODELS
-    --fibermapdir FMDIR
-    --spectrograph N
-    --outfile X
 """
 
 #- TODO: refactor algorithmic code into a separate module/function
@@ -24,9 +16,8 @@ from desispec import io
 from desispec.fluxcalibration import match_templates,normalize_templates
 from desispec.interpolation import resample_flux
 from desispec.log import get_logger
-from desispec.pipeline.utils import default_nproc
+from desispec.util import default_nproc
 from desispec.io.filters import load_filter
-
 
 def parse(options=None):
     parser = argparse.ArgumentParser(description="Extract spectra from pre-processed raw data.")
@@ -114,7 +105,7 @@ def main(args) :
         log.info("reading %s"%filename)
         frame=io.read_frame(filename)
         header=fits.getheader(filename, 0)
-        frame_fibermap,junk=io.read_fibermap(filename, header=True)
+        frame_fibermap = frame.fibermap
         frame_starindices=np.where(frame_fibermap["OBJTYPE"]=="STD")[0] 
         camera=safe_read_key(header,"CAMERA").strip().lower()
         

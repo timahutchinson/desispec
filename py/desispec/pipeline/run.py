@@ -15,18 +15,23 @@ import os
 import stat
 import errno
 import sys
-import subprocess as sp
 import re
 import pickle
 import copy
 import traceback
 import time
+import logging
+from contextlib import contextmanager
+
+import numpy as np
 
 import yaml
 
 import desispec
 
+import desispec.log
 from desispec.log import get_logger
+from desispec.util import default_nproc, dist_uniform, dist_discrete
 from .plan import *
 from .utils import option_list
 
@@ -90,12 +95,26 @@ run_states = [
 ]
 
 
-def qa_path(datafile, suffix="_QA"):
+def qa_path(datafile, suffix="_QA", figformat='pdf', qaformat='yaml'):
+    '''
+    Transforms a data filename into the QA filenames
+    
+    Args:
+        datafile : full path to a data file
+        
+    Options:
+        suffix : add to the data file name before the extension
+        figformat : 'pdf', 'jpg', or 'png' format of figure
+    
+    Returns (qafile, qafig)
+        full path names to output QA data file (yaml) and plot files
+    '''
     dir = os.path.dirname(datafile)
     base = os.path.basename(datafile)
     root, ext = os.path.splitext(base)
-    qafile = os.path.join(dir, "{}{}.pdf".format(root, suffix))
-    return qafile
+    qafile = os.path.join(dir, "{}{}.{}".format(root, suffix, qaformat))
+    qafig = os.path.join(dir, "{}{}.{}".format(root, suffix, figformat))
+    return qafile, qafig
 
 
 def finish_task(name, node):
@@ -145,6 +164,8 @@ def run_task(step, rawdir, proddir, grph, opts, comm=None):
     if step not in step_file_types.keys():
         raise ValueError("step type {} not recognized".format(step))
 
+    log = get_logger()
+
     # Verify that there is only a single node in the graph
     # of the desired step.  The graph should already have
     # been sliced before calling this task.
@@ -189,14 +210,21 @@ def run_task(step, rawdir, proddir, grph, opts, comm=None):
         arcpath = graph_path_pix(rawdir, firstarc)
         flatpath = graph_path_pix(rawdir, firstflat)
         outpath = graph_path_psfboot(proddir, name)
-        qapath = qa_path(outpath)
+        qafile, qafig = qa_path(outpath)
         options = {}
         options['fiberflat'] = flatpath
         options['arcfile'] = arcpath
-        #options['qafile'] = qapath
+        options['qafile'] = qafile
+        options['qafig'] = qafig
         options['outfile'] = outpath
         options.update(opts)
         optarray = option_list(options)
+
+        # at debug level, write out the equivalent commandline
+        com = ['RUN', 'desi_bootcalib']
+        com.extend(optarray)
+        log.debug(" ".join(com))
+
         args = bootcalib.parse(optarray)
 
         sys.stdout.flush()
@@ -229,7 +257,25 @@ def run_task(step, rawdir, proddir, grph, opts, comm=None):
         outfile = graph_path_psf(proddir, name)
         outdir = os.path.dirname(outfile)
 
-        specex.run_frame(imgfile, bootfile, outfile, opts, comm=comm)
+        options = {}
+        options['input'] = imgfile
+        options['bootfile'] = bootfile
+        options['output'] = outfile
+        if log.getEffectiveLevel() == desispec.log.DEBUG:
+            options['verbose'] = True
+        if len(opts) > 0:
+            extarray = option_list(opts)
+            options['extra'] = " ".join(extarray)
+
+        optarray = option_list(options)
+
+        # at debug level, write out the equivalent commandline
+        com = ['RUN', 'desi_compute_psf']
+        com.extend(optarray)
+        log.debug(" ".join(com))
+
+        args = specex.parse(optarray)
+        specex.main(args, comm=comm)
 
     elif step == 'psfcombine':
 
@@ -238,13 +284,8 @@ def run_task(step, rawdir, proddir, grph, opts, comm=None):
         for input in node['in']:
             infiles.append(graph_path_psf(proddir, input))
 
-        com = ['specex_mean_psf.py']
-        com.extend(['--output', outfile])
-        com.extend(['--input'])
-        com.extend(infiles)
-
         if rank == 0:
-            sp.check_call(com)
+            specex.mean_psf(infiles, outfile)
 
     elif step == 'extract':
         
@@ -292,6 +333,11 @@ def run_task(step, rawdir, proddir, grph, opts, comm=None):
         options.update(optscopy)
         optarray = option_list(options)
 
+        # at debug level, write out the equivalent commandline
+        com = ['RUN', 'desi_extract_spectra']
+        com.extend(optarray)
+        log.debug(" ".join(com))
+
         args = extract.parse(optarray)
         extract.main_mpi(args, comm=comm)
     
@@ -301,14 +347,20 @@ def run_task(step, rawdir, proddir, grph, opts, comm=None):
             raise RuntimeError('fiberflat should have only one input frame')
         framefile = graph_path_frame(proddir, node['in'][0])
         outfile = graph_path_fiberflat(proddir, name)
-        qafile = qa_path(outfile)
+        qafile, qafig = qa_path(outfile)
 
         options = {}
         options['infile'] = framefile
-        #options['qafile'] = qafile
+        options['qafile'] = qafile
+        options['qafig'] = qafig
         options['outfile'] = outfile
         options.update(opts)
         optarray = option_list(options)
+
+        # at debug level, write out the equivalent commandline
+        com = ['RUN', 'desi_compute_fiberflat']
+        com.extend(optarray)
+        log.debug(" ".join(com))
 
         args = fiberflat.parse(optarray)
 
@@ -333,15 +385,21 @@ def run_task(step, rawdir, proddir, grph, opts, comm=None):
         framefile = graph_path_frame(proddir, frm[0])
         flatfile = graph_path_fiberflat(proddir, flat[0])
         outfile = graph_path_sky(proddir, name)
-        qafile = qa_path(outfile)
+        qafile, qafig = qa_path(outfile)
 
         options = {}
         options['infile'] = framefile
         options['fiberflat'] = flatfile
-        #options['qafile'] = qafile
+        options['qafile'] = qafile
+        options['qafig'] = qafig
         options['outfile'] = outfile
         options.update(opts)
         optarray = option_list(options)
+
+        # at debug level, write out the equivalent commandline
+        com = ['RUN', 'desi_compute_sky']
+        com.extend(optarray)
+        log.debug(" ".join(com))
 
         args = skypkg.parse(optarray)
 
@@ -353,7 +411,6 @@ def run_task(step, rawdir, proddir, grph, opts, comm=None):
         frm = []
         flat = []
         sky = []
-        fm = []
         flatexp = None
         specgrph = None
         for input in node['in']:
@@ -366,34 +423,29 @@ def run_task(step, rawdir, proddir, grph, opts, comm=None):
                 flatexp = inode['id']
             elif inode['type'] == 'sky':
                 sky.append(input)
-            elif inode['type'] == 'fibermap':
-                fm.append(input)
-        if len(fm) != 1:
-            raise RuntimeError("stdstars needs exactly one fibermap file")
 
-        fmfile = graph_path_fibermap(rawdir, fm[0])
         outfile = graph_path_stdstars(proddir, name)
-        qafile = qa_path(outfile)
+        qafile, qafig = qa_path(outfile)
         
         framefiles = [graph_path_frame(proddir, x) for x in frm]
         skyfiles = [graph_path_sky(proddir, x) for x in sky]
         flatfiles = [graph_path_fiberflat(proddir, x) for x in flat]
 
         options = {}
-        #- Old-style options
-        # options['spectrograph'] = specgrph
-        # options['fiberflatexpid'] = flatexp
-        # options['fibermap'] = fmfile
-        # options['outfile'] = outfile
-        
-        #- New JG options
         options['frames'] = framefiles
         options['skymodels'] = skyfiles
         options['fiberflats'] = flatfiles
         options['outfile'] = outfile
+        options['ncpu'] = str(default_nproc)
+        #- TODO: no QA for fitting standard stars yet
         
         options.update(opts)
         optarray = option_list(options)
+
+        # at debug level, write out the equivalent commandline
+        com = ['RUN', 'desi_fit_stdstars']
+        com.extend(optarray)
+        log.debug(" ".join(com))
 
         args = stdstars.parse(optarray)
 
@@ -430,17 +482,23 @@ def run_task(step, rawdir, proddir, grph, opts, comm=None):
         skyfile = graph_path_sky(proddir, sky[0])
         starfile = graph_path_stdstars(proddir, star[0])
         outfile = graph_path_calib(proddir, name)
-        qafile = qa_path(outfile)
+        qafile, qafig = qa_path(outfile)
 
         options = {}
         options['infile'] = framefile
         options['fiberflat'] = flatfile
-        #options['qafile'] = qafile
+        options['qafile'] = qafile
+        options['qafig'] = qafig
         options['sky'] = skyfile
         options['models'] = starfile
         options['outfile'] = outfile
         options.update(opts)
         optarray = option_list(options)
+
+        # at debug level, write out the equivalent commandline
+        com = ['RUN', 'desi_compute_fluxcalibration']
+        com.extend(optarray)
+        log.debug(" ".join(com))
 
         args = fluxcal.parse(optarray)
 
@@ -477,17 +535,20 @@ def run_task(step, rawdir, proddir, grph, opts, comm=None):
         skyfile = graph_path_sky(proddir, sky[0])
         calfile = graph_path_calib(proddir, cal[0])
         outfile = graph_path_cframe(proddir, name)
-        qafile = qa_path(outfile)
 
         options = {}
         options['infile'] = framefile
         options['fiberflat'] = flatfile
-        #options['qafile'] = qafile
         options['sky'] = skyfile
         options['calib'] = calfile
         options['outfile'] = outfile
         options.update(opts)
         optarray = option_list(options)
+
+        # at debug level, write out the equivalent commandline
+        com = ['RUN', 'desi_process_exposure']
+        com.extend(optarray)
+        log.debug(" ".join(com))
 
         args = procexp.parse(optarray)
 
@@ -497,16 +558,21 @@ def run_task(step, rawdir, proddir, grph, opts, comm=None):
     elif step == 'zfind':
         brick = node['brick']
         outfile = graph_path_zbest(proddir, name)
-        qafile = qa_path(outfile)
+        qafile, qafig = qa_path(outfile)
         options = {}
         options['brick'] = brick
         options['outfile'] = outfile
+        #- TODO: no QA for desi_zfind yet
         options.update(opts)
         optarray = option_list(options)
 
+        # at debug level, write out the equivalent commandline
+        com = ['RUN', 'desi_zfind']
+        com.extend(optarray)
+        log.debug(" ".join(com))
+
         args = zfind.parse(optarray)
-        if rank == 0:
-            zfind.main(args)
+        zfind.main(args, comm=comm)
 
     else:
         raise RuntimeError("Unknown pipeline step {}".format(step))
@@ -519,6 +585,66 @@ def run_task(step, rawdir, proddir, grph, opts, comm=None):
     #print("proc {} finish runtask".format(rank))
     #sys.stdout.flush()
 
+    return
+
+
+@contextmanager
+def stdouterr_redirected(to=os.devnull, comm=None):
+    '''
+    Based on http://stackoverflow.com/questions/5081657
+
+    import os
+
+    with stdouterr_redirected(to=filename):
+        print("from Python")
+        os.system("echo non-Python applications are also supported")
+    '''
+    fd = sys.stdout.fileno()
+    fde = sys.stderr.fileno()
+
+    ##### assert that Python and C stdio write using the same file descriptor
+    ####assert libc.fileno(ctypes.c_void_p.in_dll(libc, "stdout")) == fd == 1
+
+    def _redirect_stdout(to):
+        sys.stdout.close() # + implicit flush()
+        os.dup2(to.fileno(), fd) # fd writes to 'to' file
+        sys.stdout = os.fdopen(fd, 'w') # Python writes to fd
+        sys.stderr.close() # + implicit flush()
+        os.dup2(to.fileno(), fde) # fd writes to 'to' file
+        sys.stderr = os.fdopen(fde, 'w') # Python writes to fd
+        # update desi logging to use new stdout
+        log = get_logger()
+        while len(log.handlers) > 0:
+            h = log.handlers[0]
+            log.removeHandler(h)
+        # Add the current stdout.
+        ch = logging.StreamHandler(sys.stdout)
+        formatter = logging.Formatter('%(levelname)s:%(filename)s:%(lineno)s:%(funcName)s: %(message)s')
+        ch.setFormatter(formatter)
+        log.addHandler(ch)
+
+    with os.fdopen(os.dup(fd), 'w') as old_stdout:
+        if comm is None:
+            with open(to, 'w') as file:
+                _redirect_stdout(to=file)
+        else:
+            for p in range(comm.size):
+                if p == comm.rank:
+                    with open(to, 'w') as file:
+                        _redirect_stdout(to=file)
+                comm.barrier()
+        try:
+            if (comm is None) or (comm.rank == 0):
+                log.info("Begin log redirection to {} at {}".format(to, time.asctime()))
+            sys.stdout.flush()
+            yield # allow code to be run with the redirected stdout
+        finally:
+            if (comm is None) or (comm.rank == 0):
+                log.info("End log redirection to {} at {}".format(to, time.asctime()))
+            sys.stdout.flush()
+            _redirect_stdout(to=old_stdout) # restore stdout.
+                                            # buffering and flags such as
+                                            # CLOEXEC may be different
     return
 
 
@@ -541,7 +667,7 @@ def run_step(step, rawdir, proddir, grph, opts, comm=None, taskproc=1):
     if rank == 0:
         # For this step, compute all the tasks that we need to do
         alltasks = []
-        for name, nd in grph.items():
+        for name, nd in sorted(list(grph.items())):
             if nd['type'] in step_file_types[step]:
                 alltasks.append(name)
 
@@ -583,9 +709,6 @@ def run_step(step, rawdir, proddir, grph, opts, comm=None, taskproc=1):
             comm_group = None
             comm_rank = comm
 
-    #print("proc {}, group {}, group_rank {}, ngroup {}".format(rank, group, group_rank, ngroup))
-    #sys.stdout.flush()
-
     # Now we divide up the tasks among the groups of processes as
     # equally as possible.
 
@@ -601,21 +724,38 @@ def run_step(step, rawdir, proddir, grph, opts, comm=None, taskproc=1):
             else:
                 group_ntask = 0
         else:
-            group_ntask = int(ntask / ngroup)
-            leftover = ntask % ngroup
-            if group < leftover:
-                group_ntask += 1
-                group_firsttask = group * group_ntask
+            if step == 'zfind':
+                # We load balance the bricks across process groups based
+                # on the number of targets per brick.  All bricks with 
+                # < taskproc targets are weighted the same.
+
+                if ntask <= ngroup:
+                    # distribute uniform in this case
+                    group_firsttask, group_ntask = dist_uniform(ntask, ngroup, group)
+                else:
+                    bricksizes = [ grph[x]['ntarget'] for x in tasks ]
+                    worksizes = [ taskproc if (x < taskproc) else x for x in bricksizes ]
+
+                    if rank == 0:
+                        log.debug("zfind {} groups".format(ngroup))
+                        workstr = ""
+                        for w in worksizes:
+                            workstr = "{}{} ".format(workstr, w)
+                        log.debug("zfind work sizes = {}".format(workstr))
+
+                    group_firsttask, group_ntask = dist_discrete(worksizes, ngroup, group)
+
+                if group_rank == 0:
+                    worksum = np.sum(worksizes[group_firsttask:group_firsttask+group_ntask])
+                    log.debug("group {} has tasks {}-{} sum = {}".format(group, group_firsttask, group_firsttask+group_ntask-1, worksum))
+
             else:
-                group_firsttask = ((group_ntask + 1) * leftover) + (group_ntask * (group - leftover))
+                group_firsttask, group_ntask = dist_uniform(ntask, ngroup, group)
 
     # every group goes and does its tasks...
 
     faildir = os.path.join(proddir, 'run', 'failed')
-
-    # if group_rank == 0:
-    #     print("group {}: tasks {}..{}".format(group, group_firsttask, group_firsttask+group_ntask-1))
-    #     sys.stdout.flush()
+    logdir = os.path.join(proddir, 'run', 'logs')
 
     if group_ntask > 0:
         for t in range(group_firsttask, group_firsttask + group_ntask):
@@ -623,57 +763,63 @@ def run_step(step, rawdir, proddir, grph, opts, comm=None, taskproc=1):
             #     print("group {} starting task {}".format(group, tasks[t]))
             #     sys.stdout.flush()
             # slice out just the graph for this task
+
+            (night, gname) = graph_name_split(tasks[t])
+            nfaildir = os.path.join(faildir, night)
+            nlogdir = os.path.join(logdir, night)
+
             tgraph = graph_slice(grph, names=[tasks[t]], deps=True)
-            ffile = os.path.join(faildir, "{}_{}.yaml".format(step, tasks[t]))
-            tfile = os.path.join(faildir, "{}_{}.trace".format(step, tasks[t]))
+            ffile = os.path.join(nfaildir, "{}_{}.yaml".format(step, tasks[t]))
+            
+            # For this task, we will temporarily redirect stdout and stderr
+            # to a task-specific log file.
 
-            try:
-                # if the step previously failed, clear that file now
-                if group_rank == 0:
-                    if os.path.isfile(ffile):
-                        os.remove(ffile)
-                    if os.path.isfile(tfile):
-                        os.remove(tfile)
-                # if group_rank == 0:
-                #     print("group {} runtask {}".format(group, tasks[t]))
-                #     sys.stdout.flush()
-                run_task(step, rawdir, proddir, tgraph, options, comm=comm_group)
-                # mark step as done in our group's graph
-                # if group_rank == 0:
-                #     print("group {} start graph_mark {}".format(group, tasks[t]))
-                #     sys.stdout.flush()
-                graph_mark(grph, tasks[t], state='done', descend=False)
-                # if group_rank == 0:
-                #     print("group {} end graph_mark {}".format(group, tasks[t]))
-                #     sys.stdout.flush()
-            except:
-                # The task threw an exception.  We want to dump all information
-                # that will be needed to re-run the run_task() function on just
-                # this task.
-                msg = "FAILED: step {} task {} (group {}/{} with {} processes)".format(step, tasks[t], (group+1), ngroup, taskproc)
-                log.error(msg)
-                exc_type, exc_value, exc_traceback = sys.exc_info()
-                lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
-                fyml = {}
-                fyml['step'] = step
-                fyml['rawdir'] = rawdir
-                fyml['proddir'] = proddir
-                fyml['task'] = tasks[t]
-                fyml['graph'] = tgraph
-                fyml['opts'] = options
-                fyml['procs'] = taskproc
-                if not os.path.isfile(ffile):
-                    # we are the first process to hit this
-                    with open(ffile, 'w') as f:
-                        yaml.dump(fyml, f, default_flow_style=False)
-                    with open(tfile, 'w') as f:
-                        f.write(''.join(lines))
-                # mark the step as failed in our group's local graph
-                graph_mark(grph, tasks[t], state='fail', descend=True)
+            with stdouterr_redirected(to=os.path.join(nlogdir, "{}.log".format(gname)), comm=comm_group):
+                try:
+                    # if the step previously failed, clear that file now
+                    if group_rank == 0:
+                        if os.path.isfile(ffile):
+                            os.remove(ffile)
+                    # if group_rank == 0:
+                    #     print("group {} runtask {}".format(group, tasks[t]))
+                    #     sys.stdout.flush()
+                    log.debug("running step {} task {} (group {}/{} with {} processes)".format(step, tasks[t], (group+1), ngroup, taskproc))
+                    run_task(step, rawdir, proddir, tgraph, options, comm=comm_group)
+                    # mark step as done in our group's graph
+                    # if group_rank == 0:
+                    #     print("group {} start graph_mark {}".format(group, tasks[t]))
+                    #     sys.stdout.flush()
+                    graph_mark(grph, tasks[t], state='done', descend=False)
+                    # if group_rank == 0:
+                    #     print("group {} end graph_mark {}".format(group, tasks[t]))
+                    #     sys.stdout.flush()
+                except:
+                    # The task threw an exception.  We want to dump all information
+                    # that will be needed to re-run the run_task() function on just
+                    # this task.
+                    msg = "FAILED: step {} task {} (group {}/{} with {} processes)".format(step, tasks[t], (group+1), ngroup, taskproc)
+                    log.error(msg)
+                    exc_type, exc_value, exc_traceback = sys.exc_info()
+                    lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
+                    log.error(''.join(lines))
+                    fyml = {}
+                    fyml['step'] = step
+                    fyml['rawdir'] = rawdir
+                    fyml['proddir'] = proddir
+                    fyml['task'] = tasks[t]
+                    fyml['graph'] = tgraph
+                    fyml['opts'] = options
+                    fyml['procs'] = taskproc
+                    if not os.path.isfile(ffile):
+                        log.error('Dumping yaml graph to '+ffile)
+                        # we are the first process to hit this
+                        with open(ffile, 'w') as f:
+                            yaml.dump(fyml, f, default_flow_style=False)
+                    # mark the step as failed in our group's local graph
+                    graph_mark(grph, tasks[t], state='fail', descend=True)
 
-            # if group_rank == 0:
-            #     print("group {} ending task {}".format(group, tasks[t]))
-            #     sys.stdout.flush()
+        if comm_group is not None:
+            comm_group.barrier()
 
     # Now we take the graphs from all groups and merge their states
 
@@ -751,14 +897,22 @@ def run_steps(first, last, rawdir, proddir, spectrographs=None, nightstr=None, c
 
     # get the full graph
 
-    grph = graph_read_prod(proddir, nightstr=nightstr, spectrographs=spectrographs)
-    prod_state(rawdir, proddir, grph)
+    grph = None
+    if rank == 0:
+        grph = graph_read_prod(proddir, nightstr=nightstr, spectrographs=spectrographs)
+        prod_state(rawdir, proddir, grph)
+    if comm is not None:
+        grph = comm.bcast(grph, root=0)
 
     # read run options from disk
 
     rundir = os.path.join(proddir, "run")
     optfile = os.path.join(rundir, "options.yaml")
-    opts = read_options(optfile)
+    opts = None
+    if rank == 0:
+        opts = read_options(optfile)
+    if comm is not None:
+        opts = comm.bcast(opts, root=0)
 
     # compute the ordered list of steps to run
 
@@ -800,7 +954,7 @@ def run_steps(first, last, rawdir, proddir, spectrographs=None, nightstr=None, c
     steptaskproc['stdstars'] = 1
     steptaskproc['fluxcal'] = 1
     steptaskproc['procexp'] = 1
-    steptaskproc['zfind'] = 1
+    steptaskproc['zfind'] = 48
 
     jobid = None
     if rank == 0:
@@ -820,8 +974,12 @@ def run_steps(first, last, rawdir, proddir, spectrographs=None, nightstr=None, c
 
     for st in range(firststep, laststep):
         for name, nd in grph.items():
-            if nd['type'] == run_step_types[st]:
-                graph_mark(grph, name, 'wait')
+            if nd['type'] in step_file_types[run_step_types[st]]:
+                if 'state' in nd.keys():
+                    if nd['state'] != 'done':
+                        graph_mark(grph, name, 'wait')
+                else:
+                    graph_mark(grph, name, 'wait')
 
     if rank == 0:
         graph_write(statefile, grph)
@@ -843,12 +1001,11 @@ def run_steps(first, last, rawdir, proddir, spectrographs=None, nightstr=None, c
             comm.barrier()
         if rank == 0:
             log.info("completed step {} at {}".format(run_step_types[st], time.asctime()))
-
-    if rank == 0:
-        graph_write(statefile, grph)
-        with open(statedot, 'w') as f:
-            graph_dot(grph, f)
-        log.info("finished steps {} to {}".format(run_step_types[firststep], run_step_types[laststep-1]))
+        if rank == 0:
+            graph_write(statefile, grph)
+            with open(statedot, 'w') as f:
+                graph_dot(grph, f)
+            log.info("finished steps {} to {}".format(run_step_types[firststep], run_step_types[laststep-1]))
 
     return
 
@@ -893,6 +1050,7 @@ def shell_job(path, logroot, envsetup, desisetup, commands, comrun="", mpiprocs=
     with open(path, 'w') as f:
         f.write("#!/bin/bash\n\n")
         f.write("now=`date +%Y%m%d-%H:%M:%S`\n")
+        f.write('export STARTTIME=${now}\n')
         f.write("log={}_${{now}}.log\n\n".format(logroot))
         for com in envsetup:
             f.write("{}\n".format(com))
@@ -904,14 +1062,17 @@ def shell_job(path, logroot, envsetup, desisetup, commands, comrun="", mpiprocs=
             run = "{} {}".format(comrun, mpiprocs)
         for com in commands:
             executable = com.split(' ')[0]
-            f.write("which {}\n".format(executable))
+            # f.write("which {}\n".format(executable))
+            f.write("echo logging to ${log}\n")
             f.write("time {} {} >>${{log}} 2>&1\n\n".format(run, com))
     mode = stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
     os.chmod(path, mode)
     return
 
 
-def nersc_job(path, logroot, envsetup, desisetup, commands, nodes=1, nodeproc=1, minutes=10, multisrun=False, openmp=False, multiproc=False, queue='debug'):
+def nersc_job(path, logroot, envsetup, desisetup, commands, nodes=1, \
+    nodeproc=1, minutes=10, multisrun=False, openmp=False, multiproc=False, \
+    queue='debug', jobname='desipipe'):
     hours = int(minutes/60)
     fullmin = int(minutes - 60*hours)
     timestr = "{:02d}:{:02d}:00".format(hours, fullmin)
@@ -933,7 +1094,7 @@ def nersc_job(path, logroot, envsetup, desisetup, commands, nodes=1, nodeproc=1,
         f.write("#SBATCH --account=desi\n")
         f.write("#SBATCH --nodes={}\n".format(totalnodes))
         f.write("#SBATCH --time={}\n".format(timestr))
-        f.write("#SBATCH --job-name=desipipe\n")
+        f.write("#SBATCH --job-name={}\n".format(jobname))
         f.write("#SBATCH --output={}_%j.log\n".format(logroot))
         f.write("#SBATCH --export=NONE\n\n")
         f.write("echo Starting slurm script at `date`\n\n")
@@ -977,6 +1138,8 @@ def nersc_job(path, logroot, envsetup, desisetup, commands, nodes=1, nodeproc=1,
             f.write("  app=${ex}\n")
             f.write("fi\n")
             f.write("echo calling desi_pipe_run at `date`\n\n")
+            f.write('export STARTTIME=`date +%Y%m%d-%H:%M:%S`\n')
+            f.write("echo ${{run}} ${{app}} {}\n".format(' '.join(comlist)))
             f.write("time ${{run}} ${{app}} {} >>${{log}} 2>&1".format(' '.join(comlist)))
             if multisrun:
                 f.write(" &")

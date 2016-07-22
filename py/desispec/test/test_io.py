@@ -1,8 +1,8 @@
 import unittest, os
 from uuid import uuid1
-
+from pkg_resources import resource_filename
 import numpy as np
-
+import sqlite3
 from desispec.frame import Frame
 from desispec.fiberflat import FiberFlat
 from desispec.sky import SkyModel
@@ -22,10 +22,10 @@ class TestIO(unittest.TestCase):
         cls.testfile = 'test-{uuid}/test-{uuid}.fits'.format(uuid=uuid1())
         cls.testyfile = 'test-{uuid}/test-{uuid}.yaml'.format(uuid=uuid1())
         cls.testDir = os.path.join(os.environ['HOME'],'desi_test_io')
-        cls.origEnv = {'PRODNAME':None,
+        cls.origEnv = {'SPECPROD':None,
             "DESI_SPECTRO_DATA":None,
             "DESI_SPECTRO_REDUX":None}
-        cls.testEnv = {'PRODNAME':'dailytest',
+        cls.testEnv = {'SPECPROD':'dailytest',
             "DESI_SPECTRO_DATA":os.path.join(cls.testDir,'spectro','data'),
             "DESI_SPECTRO_REDUX":os.path.join(cls.testDir,'spectro','redux')}
         for e in cls.origEnv:
@@ -42,13 +42,13 @@ class TestIO(unittest.TestCase):
                 testpath = os.path.normpath(os.path.dirname(testfile))
                 if testpath != '.':
                     os.removedirs(testpath)
-                    
+
         for e in cls.origEnv:
             if cls.origEnv[e] is None:
                 del os.environ[e]
             else:
                 os.environ[e] = cls.origEnv[e]
-                
+
         if os.path.exists(cls.testDir):
             rmtree(cls.testDir)
 
@@ -88,6 +88,14 @@ class TestIO(unittest.TestCase):
         #- Can't convert and int into a fits Header
         self.assertRaises(ValueError, desispec.io.util.fitsheader, (1,))
 
+    def _make_frame(self, nspec=5, nwave=10, ndiag=3):
+        wave = np.arange(nwave)
+        flux = np.random.uniform(size=(nspec, nwave))
+        ivar = np.random.uniform(size=(nspec, nwave))
+        mask = np.zeros((nspec, nwave), dtype=int)
+        R = np.random.uniform( size=(nspec, ndiag, nwave) )
+        return Frame(wave, flux, ivar, mask, R)
+
     def test_frame_rw(self):
         nspec, nwave, ndiag = 5, 10, 3
         flux = np.random.uniform(size=(nspec, nwave))
@@ -103,15 +111,30 @@ class TestIO(unittest.TestCase):
             desispec.io.write_frame(self.testfile, frx)
             frame = desispec.io.read_frame(self.testfile)
 
-            self.assertTrue(np.all(flux == frame.flux))
-            self.assertTrue(np.all(ivar == frame.ivar))
-            self.assertTrue(np.all(wave == frame.wave))
+            flux2 = flux.astype('f4').astype('f8')
+            ivar2 = ivar.astype('f4').astype('f8')
+            wave2 = wave.astype('f4').astype('f8')
+            R2    = R.astype('f4').astype('f8')
+
+            self.assertTrue(frame.wave.dtype == np.float64)
+            self.assertTrue(frame.flux.dtype == np.float64)
+            self.assertTrue(frame.ivar.dtype == np.float64)
+            self.assertTrue(frame.resolution_data.dtype == np.float64)
+
+            self.assertTrue(np.all(flux2 == frame.flux))
+            self.assertTrue(np.all(ivar2 == frame.ivar))
+            self.assertTrue(np.all(wave2 == frame.wave))
             self.assertTrue(np.all(mask == frame.mask))
-            self.assertTrue(np.all(R == frame.resolution_data))
+            self.assertTrue(np.all(R2 == frame.resolution_data))
             self.assertTrue(frame.resolution_data.dtype.isnative)
             self.assertEqual(frame.meta['BLAT'], meta['BLAT'])
             self.assertEqual(frame.meta['FOO'], meta['FOO'])
-            
+
+        #- Test float32 on disk vs. float64 in memory
+        for extname in ['FLUX', 'IVAR', 'WAVELENGTH', 'RESOLUTION']:
+            data = fits.getdata(self.testfile, extname)
+            self.assertEqual(data.dtype, np.dtype('>f4'), '{} not type >f4'.format(extname))
+
         #- with and without fibermap
         self.assertEqual(frame.fibermap, None)
         fibermap = desispec.io.empty_fibermap(nspec)
@@ -137,9 +160,9 @@ class TestIO(unittest.TestCase):
             desispec.io.write_sky(self.testfile, sky)
             xsky = desispec.io.read_sky(self.testfile)
 
-            self.assertTrue(np.all(sky.wave  == xsky.wave))
-            self.assertTrue(np.all(sky.flux  == xsky.flux))
-            self.assertTrue(np.all(sky.ivar  == xsky.ivar))
+            self.assertTrue(np.all(sky.wave.astype('f4').astype('f8')  == xsky.wave))
+            self.assertTrue(np.all(sky.flux.astype('f4').astype('f8')  == xsky.flux))
+            self.assertTrue(np.all(sky.ivar.astype('f4').astype('f8')  == xsky.ivar))
             self.assertTrue(np.all(sky.mask  == xsky.mask))
             self.assertTrue(xsky.flux.dtype.isnative)
             self.assertEqual(sky.mask.dtype, xsky.mask.dtype)
@@ -158,11 +181,11 @@ class TestIO(unittest.TestCase):
         desispec.io.write_fiberflat(self.testfile, ff)
         xff = desispec.io.read_fiberflat(self.testfile)
 
-        self.assertTrue(np.all(ff.fiberflat == xff.fiberflat))
-        self.assertTrue(np.all(ff.ivar == xff.ivar))
+        self.assertTrue(np.all(ff.fiberflat.astype('f4').astype('f8') == xff.fiberflat))
+        self.assertTrue(np.all(ff.ivar.astype('f4').astype('f8') == xff.ivar))
         self.assertTrue(np.all(ff.mask == xff.mask))
-        self.assertTrue(np.all(ff.meanspec == xff.meanspec))
-        self.assertTrue(np.all(ff.wave == xff.wave))
+        self.assertTrue(np.all(ff.meanspec.astype('f4').astype('f8') == xff.meanspec))
+        self.assertTrue(np.all(ff.wave.astype('f4').astype('f8') == xff.wave))
 
         self.assertTrue(xff.fiberflat.dtype.isnative)
         self.assertTrue(xff.ivar.dtype.isnative)
@@ -219,10 +242,10 @@ class TestIO(unittest.TestCase):
         data['CHI2DOF'] = np.ones(nstd)
         data['REDSHIFT'] = np.zeros(nstd)
         desispec.io.write_stdstar_models(self.testfile, flux, wave, fibers, data)
-        
+
         fx, wx, fibx = desispec.io.read_stdstar_models(self.testfile)
-        self.assertTrue(np.all(fx == flux))
-        self.assertTrue(np.all(wx == wave))
+        self.assertTrue(np.all(fx == flux.astype('f4').astype('f8')))
+        self.assertTrue(np.all(wx == wave.astype('f4').astype('f8')))
         self.assertTrue(np.all(fibx == fibers))
 
     def test_fluxcalib(self):
@@ -233,13 +256,13 @@ class TestIO(unittest.TestCase):
         calib = np.random.uniform(size=(nspec, nwave))
         ivar = np.random.uniform(size=(nspec, nwave))
         mask = np.random.uniform(0, 2, size=(nspec, nwave)).astype('i4')
-        
+
         fc = FluxCalib(wave, calib, ivar, mask)
         desispec.io.write_flux_calibration(self.testfile, fc)
         fx = desispec.io.read_flux_calibration(self.testfile)
-        self.assertTrue(np.all(fx.wave == fc.wave))
-        self.assertTrue(np.all(fx.calib == fc.calib))
-        self.assertTrue(np.all(fx.ivar == fc.ivar))
+        self.assertTrue(np.all(fx.wave  == fc.wave.astype('f4').astype('f8')))
+        self.assertTrue(np.all(fx.calib == fc.calib.astype('f4').astype('f8')))
+        self.assertTrue(np.all(fx.ivar  == fc.ivar.astype('f4').astype('f8')))
         self.assertTrue(np.all(fx.mask == fc.mask))
 
     def test_brick(self):
@@ -259,7 +282,7 @@ class TestIO(unittest.TestCase):
         brick.add_objects(flux, ivar, wave, resolution, fibermap, night, expid)
         brick.add_objects(flux, ivar, wave, resolution, fibermap, night, expid+1)
         brick.close()
-        
+
         bx = Brick(self.testfile)
         self.assertTrue(np.all(bx.get_wavelength_grid() == wave))
         self.assertEqual(bx.get_num_targets(), nspec)
@@ -274,6 +297,36 @@ class TestIO(unittest.TestCase):
         self.assertTrue( np.all(ivar2[0] == ivar[0]) )
         bx.close()
 
+    def test_zbest_io(self):
+        from desispec.zfind import ZfindBase
+        nspec, nflux = 10, 20
+        wave = np.arange(nflux)
+        flux = np.random.uniform(size=(nspec, nflux))
+        ivar = np.random.uniform(size=(nspec, nflux))
+        zfind1 = ZfindBase(wave, flux, ivar)
+
+        brickname = '1234p567'
+        targetids = np.random.randint(0,12345678, size=nspec)
+
+        desispec.io.write_zbest(self.testfile, brickname, targetids, zfind1)
+        zfind2 = desispec.io.read_zbest(self.testfile)
+
+        assert np.all(zfind2.z == zfind1.z)
+        assert np.all(zfind2.zerr == zfind1.zerr)
+        assert np.all(zfind2.zwarn == zfind1.zwarn)
+        assert np.all(zfind2.spectype == zfind1.spectype)
+        assert np.all(zfind2.subtype == zfind1.subtype)
+        assert np.all(zfind2.brickname == brickname)
+        assert np.all(zfind2.targetid == targetids)
+
+        desispec.io.write_zbest(self.testfile, brickname, targetids, zfind1, zspec=True)
+        zfind3 = desispec.io.read_zbest(self.testfile)
+
+        assert np.all(zfind3.wave == zfind1.wave)
+        assert np.all(zfind3.flux == zfind1.flux.astype(np.float32))
+        assert np.all(zfind3.ivar == zfind1.ivar.astype(np.float32))
+        assert np.all(zfind3.model == zfind1.model)
+
     def test_image_rw(self):
         shape = (5,5)
         pix = np.random.uniform(size=shape)
@@ -286,7 +339,7 @@ class TestIO(unittest.TestCase):
         #- Check output datatypes
         self.assertEqual(img2.pix.dtype, np.float64)
         self.assertEqual(img2.ivar.dtype, np.float64)
-        self.assertEqual(img2.mask.dtype, np.uint16)
+        self.assertEqual(img2.mask.dtype, np.uint32)
 
         #- Rounding from keeping np.float32 on disk means they aren't equal
         self.assertFalse(np.all(img1.pix == img2.pix))
@@ -302,7 +355,7 @@ class TestIO(unittest.TestCase):
         self.assertTrue(np.all(img1.mask == img2.mask))
         self.assertEqual(img1.readnoise, img2.readnoise)
         self.assertEqual(img1.camera, img2.camera)
-        self.assertEqual(img2.mask.dtype, np.uint16)
+        self.assertEqual(img2.mask.dtype, np.uint32)
 
         #- should work with various kinds of metadata header input
         meta = dict(BLAT='foo', BAR='quat', BIZ=1.0)
@@ -327,7 +380,7 @@ class TestIO(unittest.TestCase):
         ivar = np.ones(flux.shape)
         frame = Frame(wave, flux, ivar, spectrograph=0)
         frame.meta = dict(CAMERA='b0', FLAVOR='dark', NIGHT='20160607', EXPID=1)
-        #- Init 
+        #- Init
         qaframe = QA_Frame(frame)
         qaframe.init_skysub()
         # Write
@@ -360,10 +413,10 @@ class TestIO(unittest.TestCase):
                 if i == 'sky':
                     kwargs['camera'] = '{band}{spectrograph:d}'.format(**kwargs)
                 else:
-                    kwargs['camera'] = 'sp{spectrograph:d}'.format(**kwargs)
+                    kwargs['camera'] = '{spectrograph:d}'.format(**kwargs)
                 filenames1.append(desispec.io.findfile(i,**kwargs))
                 filenames2.append(os.path.join(os.environ['DESI_SPECTRO_REDUX'],
-                    os.environ['PRODNAME'],'exposures',kwargs['night'],
+                    os.environ['SPECPROD'],'exposures',kwargs['night'],
                     '{expid:08d}'.format(**kwargs),
                     '{i}-{camera}-{expid:08d}.fits'.format(i=i,camera=kwargs['camera'],expid=kwargs['expid'])))
         for k,f in enumerate(filenames1):
@@ -372,7 +425,7 @@ class TestIO(unittest.TestCase):
             self.assertEqual(filenames1[k],filenames2[k])
             self.assertEqual(desispec.io.filepath2url(filenames1[k]),
                 os.path.join('https://portal.nersc.gov/project/desi',
-                'collab','spectro','redux',os.environ['PRODNAME'],'exposures',
+                'collab','spectro','redux',os.environ['SPECPROD'],'exposures',
                 kwargs['night'],'{expid:08d}'.format(**kwargs),
                 os.path.basename(filenames2[k])))
         #
@@ -402,7 +455,7 @@ class TestIO(unittest.TestCase):
         with self.assertRaises(AssertionError):
             x = desispec.io.findfile('brick', brickname='0000p123', band='r1')
         os.environ['DESI_SPECTRO_REDUX'] = self.testEnv['DESI_SPECTRO_REDUX']
-            
+
     def test_findfile_outdir(self):
         outdir = '/blat/foo/bar'
         x = desispec.io.findfile('fibermap', night='20150101', expid=123, outdir=outdir)
@@ -426,13 +479,15 @@ class TestIO(unittest.TestCase):
         self.assertIsNone(paths[0])
         # self.assertFalse(os.path.exists(paths[0]))
 
-    def test_memcrc(self):
-        test_strings = ('The quick brown fox jumped over the lazy dog.',
-            "The sixth sick sheik's sixth sheep's sick.",
-            'Jackdaws love my big sphinx of quartz.')
-        test_results = (2142034932,2348585565,358631216)
-        for k,t in enumerate(test_strings):
-            self.assertEqual(desispec.io.memcrc(t),test_results[k])
+    def test_database(self):
+        conn = sqlite3.connect(':memory:')
+        c = conn.cursor(desispec.io.RawDataCursor)
+        schema = resource_filename('desispec', 'data/db/raw_data.sql')
+        with open(schema) as sql:
+            script = sql.read()
+        c.executescript(script)
+        c.connection.commit()
+
 
 #- This runs all test* functions in any TestCase class in this file
 if __name__ == '__main__':
