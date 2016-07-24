@@ -5,8 +5,11 @@ desispec.io.zfind
 IO routines for zfind.
 """
 
+import os
+
 import numpy as np
 from astropy.io import fits
+from desiutil.depend import add_dependencies
 from desispec.zfind import ZfindBase
 from desispec.log import get_logger
 
@@ -34,7 +37,7 @@ def write_zbest(filename, brickname, targetids, zfind, zspec=False):
         ('Z',         zfind.z.dtype),
         ('ZERR',      zfind.zerr.dtype),
         ('ZWARN',     zfind.zwarn.dtype),
-        ('TYPE',      zfind.type.dtype),
+        ('SPECTYPE',  zfind.spectype.dtype),
         ('SUBTYPE',   zfind.subtype.dtype),
     ]
 
@@ -44,30 +47,35 @@ def write_zbest(filename, brickname, targetids, zfind, zspec=False):
     data['Z']         = zfind.z
     data['ZERR']      = zfind.zerr
     data['ZWARN']     = zfind.zwarn
-    data['TYPE']      = zfind.type
+    data['SPECTYPE']  = zfind.spectype
     data['SUBTYPE']   = zfind.subtype
 
     hdus = fits.HDUList()
+    phdr = fits.Header()
+    add_dependencies(phdr)
+    hdus.append(fits.PrimaryHDU(None, header=phdr))
     hdus.append(fits.BinTableHDU(data, name='ZBEST', uint=True))
 
     if zspec:
-        hdus.append(fits.ImageHDU(zfind.wave, name='WAVELENGTH'))
-        hdus.append(fits.ImageHDU(zfind.flux, name='FLUX'))
-        hdus.append(fits.ImageHDU(zfind.ivar, name='IVAR'))
-        hdus.append(fits.ImageHDU(zfind.model, name='MODEL'))
+        hdus.append(fits.ImageHDU(zfind.wave.astype('f4'), name='WAVELENGTH'))
+        hdus.append(fits.ImageHDU(zfind.flux.astype('f4'), name='FLUX'))
+        hdus.append(fits.ImageHDU(zfind.ivar.astype('f4'), name='IVAR'))
+        hdus.append(fits.ImageHDU(zfind.model.astype('f4'), name='MODEL'))
 
-    hdus.writeto(filename, clobber=True)
+    hdus.writeto(filename+'.tmp', clobber=True, checksum=True)
+    os.rename(filename+'.tmp', filename)
 
 
 def read_zbest(filename):
     """Returns a desispec.zfind.ZfindBase object with contents from filename.
     """
-    fx = fits.open(filename)
+    from desispec.io.util import native_endian
+    fx = fits.open(filename, memmap=False)
     zbest = fx['ZBEST'].data
     if 'WAVELENGTH' in fx:
-        wave = fx['WAVELENGTH'].data
-        flux = fx['FLUX'].data
-        ivar = fx['IVAR'].data
+        wave = native_endian(fx['WAVELENGTH'].data.astype('f8'))
+        flux = native_endian(fx['FLUX'].data.astype('f8'))
+        ivar = native_endian(fx['IVAR'].data.astype('f8'))
         model = fx['MODEL'].data
 
         zf = ZfindBase(wave, flux, ivar, results=zbest)
@@ -77,39 +85,3 @@ def read_zbest(filename):
 
     fx.close()
     return zf
-
-#- TODO: This should be moved to a separate test file.
-def _test_zbest_io():
-    import os
-    log=get_logger()
-    nspec, nflux = 10, 20
-    wave = np.arange(nflux)
-    flux = np.random.uniform(size=(nspec, nflux))
-    ivar = np.random.uniform(size=(nspec, nflux))
-    zfind1 = ZfindBase(wave, flux, ivar)
-
-    brickname = '1234p567'
-    targetids = np.random.randint(0,12345678, size=nspec)
-
-    outfile = 'zbest_test.fits'
-    write_zbest(outfile, brickname, targetids, zfind1)
-    zfind2 = read_zbest(outfile)
-
-    assert np.all(zfind2.z == zfind1.z)
-    assert np.all(zfind2.zerr == zfind1.zerr)
-    assert np.all(zfind2.zwarn == zfind1.zwarn)
-    assert np.all(zfind2.type == zfind1.type)
-    assert np.all(zfind2.subtype == zfind1.subtype)
-    assert np.all(zfind2.brickname == brickname)
-    assert np.all(zfind2.targetid == targetids)
-
-    write_zbest(outfile, brickname, targetids, zfind1, zspec=True)
-    zfind3 = read_zbest(outfile)
-    assert np.all(zfind3.wave == zfind1.wave)
-    assert np.all(zfind3.flux == zfind1.flux)
-    assert np.all(zfind3.ivar == zfind1.ivar)
-    assert np.all(zfind3.model == zfind1.model)
-
-    log.info("looks OK to me")
-
-    os.remove(outfile)

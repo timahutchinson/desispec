@@ -13,43 +13,58 @@ import re
 
 
 def findfile(filetype, night=None, expid=None, camera=None, brickname=None,
-    band=None, spectrograph=None, rawdata_dir=None, specprod_dir=None, download=False):
+    band=None, spectrograph=None, rawdata_dir=None, specprod_dir=None,
+    download=False, outdir=None):
     """Returns location where file should be
 
     Args:
         filetype : file type, typically the prefix, e.g. "frame" or "psf"
-        night : [optional] YEARMMDD string
-        expid : [optional] integer exposure id
-        camera : [optional] 'b0' 'r1' .. 'z9'
-        brickname : [optional] brick name string
-        band : [optional] one of 'b','r','z' identifying the camera band
-        spectrograph : [optional] spectrograph number, 0-9
-        rawdata_dir : [optional] overrides $DESI_SPECTRO_DATA
-        specprod_dir : [optional] overrides $DESI_SPECTRO_REDUX/$PRODNAME/
-        download : [optional, not yet implemented]
-            if not found locally, try to fetch remotely
+
+    Args depending upon filetype:
+        night : YEARMMDD string
+        expid : integer exposure id
+        camera : 'b0' 'r1' .. 'z9'
+        brickname : brick name string
+        band : one of 'b','r','z' identifying the camera band
+        spectrograph : spectrograph number, 0-9
+
+    Options:
+        rawdata_dir : overrides $DESI_SPECTRO_DATA
+        specprod_dir : overrides $DESI_SPECTRO_REDUX/$SPECPROD/
+        download : if not found locally, try to fetch remotely
+        outdir : use this directory for output instead of canonical location
     """
 
-    #- NOTE: specprod_dir is the directory $DESI_SPECTRO_REDUX/$PRODNAME,
-    #-       specprod is just the environment variable $PRODNAME
+    #- NOTE: specprod_dir is the directory $DESI_SPECTRO_REDUX/$SPECPROD,
+    #-       specprod is just the environment variable $SPECPROD
 
     location = dict(
-        raw = '{rawdata_dir}/{night}/desi-{expid:08d}.fits',
+        raw = '{rawdata_dir}/{night}/desi-{expid:08d}.fits.fz',
         pix = '{rawdata_dir}/{night}/pix-{camera}-{expid:08d}.fits',
-        ### fiberflat = '{specprod_dir}/exposures/{night}/{expid:08d}/fiberflat-{camera}-{expid:08d}.fits',
         fiberflat = '{specprod_dir}/calib2d/{night}/fiberflat-{camera}-{expid:08d}.fits',
         frame = '{specprod_dir}/exposures/{night}/{expid:08d}/frame-{camera}-{expid:08d}.fits',
         cframe = '{specprod_dir}/exposures/{night}/{expid:08d}/cframe-{camera}-{expid:08d}.fits',
         sky = '{specprod_dir}/exposures/{night}/{expid:08d}/sky-{camera}-{expid:08d}.fits',
-        stdstars = '{specprod_dir}/exposures/{night}/{expid:08d}/stdstars-sp{spectrograph:d}-{expid:08d}.fits',
-        calib = '{specprod_dir}/exposures/{night}/{expid:08d}/fluxcalib-{camera}-{expid:08d}.fits',
+        stdstars = '{specprod_dir}/exposures/{night}/{expid:08d}/stdstars-{spectrograph:d}-{expid:08d}.fits',
+        calib = '{specprod_dir}/exposures/{night}/{expid:08d}/calib-{camera}-{expid:08d}.fits',
         qa_data = '{specprod_dir}/exposures/{night}/{expid:08d}/qa-{camera}-{expid:08d}.yaml',
+<<<<<<< HEAD
         qa_sky_fig = '{specprod_dir}/exposures/{night}/{expid:08d}/qa-sky-{camera}-{expid:08d}.pdf',
         qa_flux_fig = '{specprod_dir}/exposures/{night}/{expid:08d}/qa-flux-{camera}-{expid:08d}.pdf',
         qa_calib = '{specprod_dir}/calib2d/{night}/qa-{camera}-{expid:08d}.yaml',
         qa_flat_fig = '{specprod_dir}/calib2d/{night}/qa-flat-{camera}-{expid:08d}.pdf',
         qa_ztruth = '{specprod_dir}/exposures/{night}/qa-ztruth-{night}.yaml',
         qa_ztruth_fig = '{specprod_dir}/exposures/{night}/qa-ztruth-{night}.pdf',
+=======
+        qa_data_exp = '{specprod_dir}/exposures/{night}/{expid:08d}/qa-{expid:08d}.yaml',
+        qa_sky_fig = '{specprod_dir}/exposures/{night}/{expid:08d}/qa-sky-{camera}-{expid:08d}.png',
+        qa_flux_fig = '{specprod_dir}/exposures/{night}/{expid:08d}/qa-flux-{camera}-{expid:08d}.png',
+        qa_calib = '{specprod_dir}/calib2d/{night}/qa-{camera}-{expid:08d}.yaml',
+        qa_calib_exp = '{specprod_dir}/calib2d/{night}/qa-{expid:08d}.yaml',
+        qa_flat_fig = '{specprod_dir}/calib2d/{night}/qa-flat-{camera}-{expid:08d}.png',
+        qa_ztruth = '{specprod_dir}/exposures/{night}/qa-ztruth-{night}.yaml',
+        qa_ztruth_fig = '{specprod_dir}/exposures/{night}/qa-ztruth-{night}.png',
+>>>>>>> 9f7a6f2c35a3dba59c29aee81ec75a224615bbb0
         ### psf = '{specprod_dir}/exposures/{night}/{expid:08d}/psf-{camera}-{expid:08d}.fits',
         psf = '{specprod_dir}/calib2d/{night}/psf-{camera}-{expid:08d}.fits',
         fibermap = '{rawdata_dir}/{night}/fibermap-{expid:08d}.fits',
@@ -76,8 +91,8 @@ def findfile(filetype, night=None, expid=None, camera=None, brickname=None,
         specprod_dir = specprod_root()
 
     if 'specprod' in required_inputs:
-        #- Replace / with _ in $PRODNAME so we can use it in a filename
-        specprod = os.getenv('PRODNAME').replace('/', '_')
+        #- Replace / with _ in $SPECPROD so we can use it in a filename
+        specprod = os.getenv('SPECPROD').replace('/', '_')
     else:
         specprod = None
 
@@ -93,15 +108,18 @@ def findfile(filetype, night=None, expid=None, camera=None, brickname=None,
     for i in required_inputs:
         if actual_inputs[i] is None:
             raise ValueError("Required input '{0}' is not set for type '{1}'!".format(i,filetype))
-    
+
     #- normpath to remove extraneous double slashes /a/b//c/d
     filepath = os.path.normpath(location[filetype].format(**actual_inputs))
+
+    if outdir:
+        filepath = os.path.join(outdir, os.path.basename(filepath))
 
     if download:
         from .download import download
         filepath = download(filepath,single_thread=True)[0]
-    return filepath
 
+    return filepath
 
 def get_raw_files(filetype, night, expid, rawdata_dir=None):
     """Get files for a specified exposure.
@@ -253,11 +271,11 @@ def rawdata_root():
 
 def specprod_root():
     """Return directory root for spectro production, i.e.
-    ``$DESI_SPECTRO_REDUX/$PRODNAME``.
+    ``$DESI_SPECTRO_REDUX/$SPECPROD``.
 
     Raises:
         AssertionError: if these environment variables aren't set.
     """
-    assert 'PRODNAME' in os.environ, 'Missing $PRODNAME environment variable'
+    assert 'SPECPROD' in os.environ, 'Missing $SPECPROD environment variable'
     assert 'DESI_SPECTRO_REDUX' in os.environ, 'Missing $DESI_SPECTRO_REDUX environment variable'
-    return os.path.join(os.getenv('DESI_SPECTRO_REDUX'), os.getenv('PRODNAME'))
+    return os.path.join(os.getenv('DESI_SPECTRO_REDUX'), os.getenv('SPECPROD'))

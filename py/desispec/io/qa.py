@@ -4,6 +4,8 @@ desispec.io.qa
 
 IO routines for QA
 """
+from __future__ import print_function, absolute_import, division, unicode_literals
+
 import os, yaml
 
 from desiutil.io import yamlify
@@ -13,6 +15,12 @@ from desispec.qa import QA_Brick
 from desispec.io import findfile
 from desispec.io.util import makepath
 from desispec.log import get_logger
+
+# Python 2 & 3 compatibility
+try:
+    basestring
+except NameError:
+    basestring = str
 
 log=get_logger()
 
@@ -51,34 +59,33 @@ def read_qa_frame(filename):
     qa_data = read_qa_data(filename)
 
     # Instantiate
-    qaframe = QA_Frame(flavor=qa_data['flavor'], camera=qa_data['camera'], in_data=qa_data)
+    qaframe = QA_Frame(qa_data)
 
     return qaframe
 
 
-def load_qa_frame(filename, frame, flavor=None):
+def load_qa_frame(filename, frame=None, flavor=None):
     """ Load an existing QA_Frame or generate one, as needed
+
     Args:
         filename: str
-        frame: Frame object
+        frame: Frame object, optional
         flavor: str, optional
-          Type of QA_Frame
+            Type of QA_Frame
 
     Returns:
-    qa_frame: QA_Frame object
+        qa_frame: QA_Frame object
     """
     if os.path.isfile(filename): # Read from file, if it exists
         qaframe = read_qa_frame(filename)
         log.info("Loaded QA file {:s}".format(filename))
-        # Check camera
-        try:
-            camera = frame.meta['CAMERA']
-        except:
-            pass #
-        else:
-            if qaframe.camera != camera:
-                raise ValueError('Wrong QA file!')
+        # Check against frame, if provided
+        if frame is not None:
+            for key in ['camera','expid','night','flavor']:
+                assert getattr(qaframe, key) == frame.meta[key.upper()]
     else:  # Init
+        if frame is None:
+            log.error("QA file {:s} does not exist.  Expecting frame input".format(filename))
         qaframe = QA_Frame(frame)
     # Set flavor?
     if flavor is not None:
@@ -120,22 +127,108 @@ def write_qa_brick(outfile, qabrick):
 
     return outfile
 
+
 def write_qa_frame(outfile, qaframe):
-    """Write QA for a given exposure
+    """Write QA for a given frame
 
     Args:
-        outfile : filename or (night, expid) tuple
-        qa_exp : QA_Exposure object, with the following attributes
-            _data: dict of QA info
-            expid : Exposure id
-            exptype : Exposure type
+        outfile : str
+          filename
+        qa_exp : QA_Frame object, with the following attributes
+            qa_data: dict of QA info
     """
     outfile = makepath(outfile, 'qa')
 
+    # Generate the dict
+    odict = {qaframe.night: {qaframe.expid: {qaframe.camera: {}, 'flavor': qaframe.flavor}}}
+    odict[qaframe.night][qaframe.expid][qaframe.camera] = qaframe.qa_data
+    ydict = yamlify(odict)
     # Simple yaml
-    ydict = yamlify(qaframe.data)
     with open(outfile, 'w') as yamlf:
         yamlf.write( yaml.dump(ydict))#, default_flow_style=True) )
 
     return outfile
+
+
+def write_qa_exposure(outroot, qaexp, ret_dict=False):
+    """Write QA for a given exposure
+
+    Args:
+        outroot : str
+          filename without format extension
+        qa_exp : QA_Exposure object
+        ret_dict : bool, optional
+          Return dict only?  [for qa_prod, mainly]
+    Returns:
+        outfile or odict : str or dict
+    """
+    # Generate the dict
+    odict = {qaexp.night: {qaexp.expid: {}}}
+    odict[qaexp.night][qaexp.expid]['flavor'] = qaexp.flavor
+    cameras = qaexp.data['frames'].keys()
+    for camera in cameras:
+        odict[qaexp.night][qaexp.expid][camera] = qaexp.data['frames'][camera]
+    # Return dict only?
+    if ret_dict:
+        return odict
+    # Simple yaml
+    ydict = yamlify(odict)
+    outfile = outroot+'.yaml'
+    outfile = makepath(outfile, 'qa')
+    with open(outfile, 'w') as yamlf:
+        yamlf.write( yaml.dump(ydict))#, default_flow_style=True) )
+
+    return outfile
+
+
+def load_qa_prod(inroot):
+    """Load QA for a given production
+
+    Args:
+        inroot : str
+          filename without format extension
+    Returns:
+        odict : dict
+    """
+    infile = inroot+'.yaml'
+    log.info("Loading QA prod file: {:s}".format(infile))
+    # Read
+    odict = read_qa_data(infile)
+    # Return
+    return odict
+
+
+def write_qa_prod(outroot, qaprod):
+    """Write QA for a given production
+
+    Args:
+        outroot : str
+          filename without format extension
+        qa_prod : QA_Prod object
+
+    Returns:
+        outfile or odict : str or dict
+    """
+    from desiutil.io import combine_dicts
+    outfile = outroot+'.yaml'
+    outfile = makepath(outfile, 'qa')
+
+    # Loop on exposures
+    odict = {}
+    for qaexp in qaprod.qa_exps:
+        # Get the exposure dict
+        idict = write_qa_exposure('foo', qaexp, ret_dict=True)
+        odict = combine_dicts(odict, idict)
+    ydict = yamlify(odict)
+    # Simple yaml
+    ydict = yamlify(qaframe.data)
+    with open(outfile, 'w') as yamlf:
+        yamlf.write( yaml.dump(ydict))#, default_flow_style=True) )
+<<<<<<< HEAD
+=======
+    log.info('Wrote QA_Prod file: {:s}'.format(outfile))
+>>>>>>> 9f7a6f2c35a3dba59c29aee81ec75a224615bbb0
+
+    return outfile
+
 

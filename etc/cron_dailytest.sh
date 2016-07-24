@@ -23,8 +23,10 @@ module load specter/master
 module load desitarget/master
 module load redmonster/master
 module switch desimodel/master
+module switch desiutil/master
 
 #- Update software packages
+echo 'updating desiutil'; cd $DESIUTIL; git pull; fix_permissions.sh .
 echo 'updating speclite'; cd $SPECLITE; git pull; fix_permissions.sh .
 echo 'updating desispec'; cd $DESISPEC; git pull; fix_permissions.sh .
 echo 'updating desisim'; cd $DESISIM; git pull; fix_permissions.sh .
@@ -50,6 +52,7 @@ export DESI_SPECTRO_DATA=$DAILYTEST_ROOT/spectro/sim/$PIXPROD
 export DESI_SPECTRO_SIM=$DAILYTEST_ROOT/spectro/sim
 
 export PRODNAME=dailytest
+export SPECPROD=dailytest
 export DESI_SPECTRO_REDUX=$DAILYTEST_ROOT/spectro/redux
 
 #- Cleanup from previous tests

@@ -8,20 +8,16 @@ from desispec.io.qa import load_qa_frame
 from desispec.io import write_qa_frame
 from desispec.fiberflat import apply_fiberflat
 from desispec.sky import compute_sky
-from desispec.qa.qa_exposure import QA_Frame
 from desispec.qa import qa_plots
 from desispec.log import get_logger
 import argparse
 import numpy as np
-import sys, os
 
 
 def parse(options=None):
     parser = argparse.ArgumentParser(description="Compute the sky model.")
 
     parser.add_argument('--infile', type = str, default = None, required=True,
-                        help = 'path of DESI exposure frame fits file')
-    parser.add_argument('--fibermap', type = str, default = None, required=False,
                         help = 'path of DESI exposure frame fits file')
     parser.add_argument('--fiberflat', type = str, default = None, required=True,
                         help = 'path of DESI fiberflat fits file')
@@ -45,9 +41,6 @@ def main(args) :
     log=get_logger()
 
     log.info("starting")
-
-    if args.fibermap is not None:
-        log.warn('--fibermap is deprecated (and not used at all)')
 
     # read exposure to load data and get range of spectra
     frame = read_frame(args.infile)

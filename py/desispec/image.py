@@ -4,6 +4,7 @@ Lightweight wrapper class for preprocessed image data
 import copy
 import numpy as np
 from desispec.maskbits import ccdmask
+from desispec import util
 
 class Image(object):
     def __init__(self, pix, ivar, mask=None, readnoise=0.0, camera='unknown',
@@ -13,9 +14,9 @@ class Image(object):
         
         Args:
             pix : 2D numpy.ndarray of image pixels
-            ivar : inverse variance of pix, same shape as pix
             
         Optional:
+            ivar : inverse variance of pix, same shape as pix
             mask : 0 is good, non-0 is bad; default is (ivar==0)
             readnoise : CCD readout noise in electrons/pixel (float)
             camera : e.g. 'b0', 'r1', 'z9'
@@ -32,9 +33,9 @@ class Image(object):
         self.ivar = ivar
         self.meta = meta
         if mask is not None:
-            self.mask = mask.astype(np.uint16)
+            self.mask = util.mask32(mask)
         else:
-            self.mask = np.zeros_like(self.ivar, dtype=np.uint16)
+            self.mask = np.zeros(self.ivar.shape, dtype=np.uint32)
             self.mask[self.ivar == 0] |= ccdmask.BAD
         
         #- Optional parameters

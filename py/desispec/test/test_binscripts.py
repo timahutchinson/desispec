@@ -13,6 +13,7 @@ from desispec.fiberflat import FiberFlat
 from desispec.sky import SkyModel
 from desispec import io
 from desispec.pipeline.core import runcmd
+import desispec.scripts
 
 class TestBinScripts(unittest.TestCase):
 
@@ -27,7 +28,8 @@ class TestBinScripts(unittest.TestCase):
         cls.fibermapfile = 'fibermap-'+id+'.fits'
         cls.skyfile = 'sky-'+id+'.fits'
         cls.stdfile = 'std-'+id+'.fits'
-        cls.qafile = 'qa-'+id+'.yaml'
+        cls.qa_calib_file = 'qa-calib-'+id+'.yaml'
+        cls.qa_data_file = 'qa-data-'+id+'.yaml'
         cls.qafig = 'qa-'+id+'.pdf'
         cls.topDir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
         cls.binDir = os.path.join(cls.topDir,'bin')
@@ -42,7 +44,8 @@ class TestBinScripts(unittest.TestCase):
     def tearDownClass(cls):
         """Cleanup in case tests crashed and left files behind"""
         for filename in [cls.framefile, cls.fiberflatfile, cls.fibermapfile, \
-            cls.skyfile, cls.calibfile, cls.stdfile, cls.qafile, cls.qafig]:
+            cls.skyfile, cls.calibfile, cls.stdfile, cls.qa_calib_file,
+                         cls.qa_data_file, cls.qafig]:
             if os.path.exists(filename):
                 os.remove(filename)
         if cls.origPath is None:
@@ -50,7 +53,7 @@ class TestBinScripts(unittest.TestCase):
         else:
             os.environ['PYTHONPATH'] = cls.origPath
 
-    def _write_frame(self, flavor='none', camera='b'):
+    def _write_frame(self, flavor='none', camera='b', expid=1, night='20160607'):
         """Write a fake frame"""
         wave = 5000+np.arange(self.nwave)
         flux = np.ones((self.nspec, self.nwave))
@@ -59,7 +62,7 @@ class TestBinScripts(unittest.TestCase):
         Rdata = np.ones((self.nspec, 1, self.nwave))
         fibermap = self._get_fibermap()
         frame = Frame(wave, flux, ivar, mask, Rdata, fibermap=fibermap,
-                      meta=dict(flavor=flavor, camera=camera))
+                      meta=dict(FLAVOR=flavor, CAMERA=camera, EXPID=expid, NIGHT=night))
         io.write_frame(self.framefile, frame)
 
     def _write_fiberflat(self):
@@ -100,10 +103,17 @@ class TestBinScripts(unittest.TestCase):
         stdflux = np.ones((self.nspec, self.nwave))
         fibers = np.array([1,4]).astype(int)
         hdu1=fits.PrimaryHDU(stdflux)
-        hdu2=fits.ImageHDU(wave)
-        hdu3=fits.ImageHDU(fibers)
+        hdu1.header['EXTNAME'] = 'FLUX'
+        hdu2=fits.ImageHDU(wave, name='WAVELENGTH')
+        hdu3=fits.ImageHDU(fibers, name='FIBERS')
         hdulist=fits.HDUList([hdu1,hdu2,hdu3])
         hdulist.writeto(self.stdfile,clobber=True)
+
+    def _remove_files(self, filenames):
+        '''Utility to cleanup output files if they exist'''
+        for fx in filenames:
+            if os.path.exists(fx):
+                os.remove(fx)
 
     def test_compute_fiberflat(self):
         """
@@ -113,49 +123,79 @@ class TestBinScripts(unittest.TestCase):
         self._write_fibermap()
 
         # QA fig requires fibermapfile
-        cmd = '{} {}/desi_compute_fiberflat --infile {} --fibermap {} --outfile {} --qafile {} --qafig {}'.format(
-                sys.executable, self.binDir, self.framefile, self.fibermapfile,
-                self.fiberflatfile, self.qafile, self.qafig)
-        err = runcmd(cmd,
-                     inputs = [self.framefile, self.fibermapfile],
-                     outputs = [self.fiberflatfile,self.qafile,self.qafig], clobber=True)
+        cmd = '{} {}/desi_compute_fiberflat --infile {} --outfile {} --qafile {} --qafig {}'.format(
+                sys.executable, self.binDir, self.framefile,
+                self.fiberflatfile, self.qa_calib_file, self.qafig)
+        outputs = [self.fiberflatfile,self.qa_calib_file,self.qafig]
+        inputs = [self.framefile,]
+        err = runcmd(cmd, inputs=inputs, outputs=outputs, clobber=True)
         self.assertEqual(err, 0)
 
         #- Confirm that the output file can be read as a fiberflat
-        ff = io.read_fiberflat(self.fiberflatfile)
+        ff1 = io.read_fiberflat(self.fiberflatfile)
+        
+        #- Remove outputs and call again via function instead of system call
+        self._remove_files(outputs)
+        args = desispec.scripts.fiberflat.parse(cmd.split()[2:])        
+        err = runcmd(desispec.scripts.fiberflat.main, args=[args,],
+            inputs=inputs, outputs=outputs, clobber=True)
+
+        #- Confirm that the output file can be read as a fiberflat
+        ff2 = io.read_fiberflat(self.fiberflatfile)
+        
+        self.assertTrue(np.all(ff1.fiberflat == ff2.fiberflat))
+        self.assertTrue(np.all(ff1.ivar == ff2.ivar))
+        self.assertTrue(np.all(ff1.mask == ff2.mask))
+        self.assertTrue(np.all(ff1.meanspec == ff2.meanspec))
+        self.assertTrue(np.all(ff1.wave == ff2.wave))
+        self.assertTrue(np.all(ff1.fibers == ff2.fibers))        
 
     def test_compute_fluxcalib(self):
         """
-        Tests desi_compute_sky --infile frame.fits --fibermap fibermap.fits --fiberflat fiberflat.fits --outfile skymodel.fits
+        Tests desi_compute_sky --infile frame.fits --fiberflat fiberflat.fits --outfile skymodel.fits
         """
-        self._write_frame(flavor='dark', camera='b')
+        self._write_frame(flavor='dark', camera='b0')
         self._write_fiberflat()
         self._write_fibermap()
         self._write_skymodel()
         self._write_stdstars()
 
-        cmd = "{} {}/desi_compute_fluxcalibration --infile {} --fibermap {} --fiberflat {} --sky {} --models {} --outfile {} --qafile {} --qafig {}".format(
-            sys.executable, self.binDir, self.framefile, self.fibermapfile, self.fiberflatfile, self.skyfile, self.stdfile,
-                self.calibfile, self.qafile, self.qafig)
-        err = runcmd(cmd,
-                inputs  = [self.framefile, self.fiberflatfile, self.fibermapfile, self.skyfile, self.stdfile],
-                outputs = [self.calibfile,self.qafile,self.qafig,], clobber=True )
+        cmd = "{} {}/desi_compute_fluxcalibration --infile {} --fiberflat {} --sky {} --models {} --outfile {} --qafile {} --qafig {}".format(
+            sys.executable, self.binDir, self.framefile, self.fiberflatfile, self.skyfile, self.stdfile,
+                self.calibfile, self.qa_data_file, self.qafig)
+        inputs  = [self.framefile, self.fiberflatfile, self.skyfile, self.stdfile]
+        outputs = [self.calibfile,self.qa_data_file,self.qafig,]
+        err = runcmd(cmd, inputs=inputs, outputs=outputs, clobber=True)
         self.assertEqual(err, 0)
+
+        #- Remove outputs and call again via function instead of system call
+        self._remove_files(outputs)
+        args = desispec.scripts.fluxcalibration.parse(cmd.split()[2:])        
+        err = runcmd(desispec.scripts.fluxcalibration.main, args=[args,],
+            inputs=inputs, outputs=outputs, clobber=True)
+        self.assertEqual(err, None)
 
     def test_compute_sky(self):
         """
-        Tests desi_compute_sky --infile frame.fits --fibermap fibermap.fits --fiberflat fiberflat.fits --outfile skymodel.fits
+        Tests desi_compute_sky --infile frame.fits --fiberflat fiberflat.fits --outfile skymodel.fits
         """
-        self._write_frame(flavor='dark')
+        self._write_frame(flavor='dark', camera='b0')  # MUST MATCH FLUXCALIB ABOVE
         self._write_fiberflat()
         self._write_fibermap()
 
-        cmd = "{} {}/desi_compute_sky --infile {} --fibermap {} --fiberflat {} --outfile {} --qafile {} --qafig {}".format(
-            sys.executable, self.binDir, self.framefile, self.fibermapfile, self.fiberflatfile, self.skyfile, self.qafile, self.qafig)
-        err = runcmd(cmd,
-                inputs  = [self.framefile, self.fiberflatfile, self.fibermapfile],
-                outputs = [self.skyfile,self.qafile,self.qafig,], clobber=True )
+        cmd = "{} {}/desi_compute_sky --infile {} --fiberflat {} --outfile {} --qafile {} --qafig {}".format(
+            sys.executable, self.binDir, self.framefile, self.fiberflatfile, self.skyfile, self.qa_data_file, self.qafig)
+        inputs  = [self.framefile, self.fiberflatfile]
+        outputs = [self.skyfile,self.qa_data_file,self.qafig,]
+        err = runcmd(cmd, inputs=inputs, outputs=outputs, clobber=True)
         self.assertEqual(err, 0)
+
+        #- Remove outputs and call again via function instead of system call
+        self._remove_files(outputs)
+        args = desispec.scripts.sky.parse(cmd.split()[2:])        
+        err = runcmd(desispec.scripts.sky.main, args=[args,],
+            inputs=inputs, outputs=outputs, clobber=True)
+        self.assertEqual(err, None)
 
 
 #- This runs all test* functions in any TestCase class in this file

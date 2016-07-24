@@ -11,31 +11,62 @@ from .linalg import cholesky_solve, cholesky_solve_and_invert, spline_fit
 from .interpolation import resample_flux
 from .log import get_logger
 from .io.filters import load_filter
+from desispec import util
 import scipy, scipy.sparse, scipy.ndimage
 import sys
+import time
 from astropy import units
-
-#debug
-#import pylab
+import multiprocessing
 
 #rebin spectra into new wavebins. This should be equivalent to desispec.interpolation.resample_flux. So may not be needed here
 #But should move from here anyway.
 
 def rebinSpectra(spectra,oldWaveBins,newWaveBins):
-    tck=scipy.interpolate.splrep(oldWaveBins,spectra,s=0,k=5)
+    tck=scipy.interpolate.splrep(oldWaveBins,spectra,s=0,k=1)
     specnew=scipy.interpolate.splev(newWaveBins,tck,der=0)
     return specnew
 
-#import some global constants
+def applySmoothingFilter(flux):
+    return scipy.ndimage.filters.median_filter(flux,200)
+#
+# Import some global constants.
+#
+# Why not use astropy constants?
+#
+# This is VERY inconvenient when trying to build documentation!
+# The documentation may be build in an environment that does not have
+# scipy installed.  There is no obvious reason why this has to be a module-level
+# calculation.
+#
 import scipy.constants as const
 h=const.h
 pi=const.pi
 e=const.e
 c=const.c
 erg=const.erg
-hc= h/erg*c*1.e10 #(in units of ergsA)
+try:
+    hc = const.h/const.erg*const.c*1.e10  # (in units of ergsA)
+except TypeError:
+    hc = 1.9864458241717586e-08
 
-def match_templates(wave, flux, ivar, resolution_data, stdwave, stdflux):
+def compute_chi2(wave,normalized_flux,normalized_ivar,resolution_data,shifted_stdwave,star_stdflux) :
+    chi2 = None
+    try :
+        chi2=0.
+        for cam in normalized_flux.keys() :
+            tmp=resample_flux(wave[cam],shifted_stdwave,star_stdflux) # this is slow
+            model=Resolution(resolution_data[cam]).dot(tmp) # this is slow
+            tmp=applySmoothingFilter(model) # this is fast
+            normalized_model = model/(tmp+(tmp==0))
+            chi2 += np.sum(normalized_ivar[cam]*(normalized_flux[cam]-normalized_model)**2)
+    except :
+        chi2 = 1e20
+    return chi2
+
+def _func(arg) :
+    return compute_chi2(**arg)
+
+def match_templates(wave, flux, ivar, resolution_data, stdwave, stdflux, teff, logg, feh, ncpu=1, z_max=0.005, z_res=0.00005):
     """For each input spectrum, identify which standard star template is the closest
     match, factoring out broadband throughput/calibration differences.
 
@@ -46,10 +77,15 @@ def match_templates(wave, flux, ivar, resolution_data, stdwave, stdflux):
         resolution_data: resolution corresponding to the star's fiber
         stdwave : 1D standard star template wavelengths [Angstroms]
         stdflux : 2D[nstd, nwave] template flux
+        teff : 1D[nstd] effective model temperature
+        logg : 1D[nstd] model surface gravity
+        feh : 1D[nstd] model metallicity
+        ncpu : number of cpu for multiprocessing
 
     Returns:
-        stdflux[nspec, nwave] : standard star flux sampled at input wave
-        stdindices[nspec] : indices of input standards for each match
+        index : index of standard star
+        redshift : redshift of standard star
+        chipdf : reduced chi2
 
     Notes:
       - wave and stdwave can be on different grids that don't
@@ -64,75 +100,132 @@ def match_templates(wave, flux, ivar, resolution_data, stdwave, stdflux):
     # flux should be already flat fielded and sky subtracted.
     # First normalize both data and model by dividing by median filter.
 
-    def applySmoothingFilter(flux):
-        return scipy.ndimage.filters.median_filter(flux,200) # bin range has to be optimized
+    cameras = flux.keys()
+    log = get_logger()
+    log.debug(time.asctime())
+
+    # find canonical f-type model: Teff=6000, logg=4, Fe/H=-1.5
+    #####################################
+    canonical_model=np.argmin((teff-6000.0)**2+(logg-4.0)**2+(feh+1.5)**2)
+    #log.info("canonical model=%s"%str(canonical_model))
+
+    # resampling on a log wavelength grid
+    #####################################
+    # need to go fast at the beginning ... so we resample both data and model on a log grid
+
+    # define grid
+    minwave = 100000.
+    maxwave = 0.
+    for cam in cameras :
+        minwave=min(minwave,np.min(wave[cam]))
+        maxwave=max(maxwave,np.max(wave[cam]))
+    # ala boss
+    lstep=np.log10(1+z_res)
+    margin=int(np.log10(1+z_max)/lstep)+1
+    minlwave=np.log10(minwave)
+    maxlwave=np.log10(maxwave) # desired, but readjusted
+    nstep=(maxlwave-minlwave)/lstep
+    #print "nstep=",nstep
+    resampled_lwave=minlwave+lstep*np.arange(nstep)
+    resampled_wave=10**resampled_lwave
+
+    # map data on grid
+    resampled_data={}
+    resampled_ivar={}
+    resampled_model={}
+    for cam in cameras :
+        tmp_flux,tmp_ivar=resample_flux(resampled_wave,wave[cam],flux[cam],ivar[cam])
+        resampled_data[cam]=tmp_flux
+        resampled_ivar[cam]=tmp_ivar
+
+        # we need to have the model on a larger grid than the data wave for redshifting
+        dwave=wave[cam][-1]-wave[cam][-2]
+        npix=int((wave[cam][-1]*z_max)/dwave+2)
+        extended_cam_wave=np.append( wave[cam][0]+dwave*np.arange(-npix,0) ,  wave[cam])
+        extended_cam_wave=np.append( extended_cam_wave, wave[cam][-1]+dwave*np.arange(1,npix+1))
+        # ok now we also need to increase the resolution
+        tmp_res=np.zeros((resolution_data[cam].shape[0],resolution_data[cam].shape[1]+2*npix))
+        tmp_res[:,:npix] = np.tile(resolution_data[cam][:,0],(npix,1)).T
+        tmp_res[:,npix:-npix] = resolution_data[cam]
+        tmp_res[:,-npix:] = np.tile(resolution_data[cam][:,-1],(npix,1)).T
+        # resampled model at camera resolution, with margin
+        tmp=resample_flux(extended_cam_wave,stdwave,stdflux[canonical_model])
+        tmp=Resolution(tmp_res).dot(tmp)
+        # map on log lam grid
+        resampled_model[cam]=resample_flux(resampled_wave,extended_cam_wave,tmp)
+
+        # we now normalize both model and data
+        tmp=applySmoothingFilter(resampled_data[cam])
+        resampled_data[cam]/=(tmp+(tmp==0))
+        resampled_ivar[cam]*=tmp**2
+        tmp=applySmoothingFilter(resampled_model[cam])
+        resampled_model[cam]/=(tmp+(tmp==0))
+        resampled_ivar[cam]*=(tmp!=0)
+
+    # fit the best redshift
+    chi2=np.zeros((2*margin+1))
+    for i in range(-margin,margin+1) :
+        for cam in cameras :
+            if i<margin :
+                chi2[i+margin] += np.sum(resampled_ivar[cam][margin:-margin]*(resampled_data[cam][margin:-margin]-resampled_model[cam][margin+i:-margin+i])**2)
+            else :
+                chi2[i+margin] += np.sum(resampled_ivar[cam][margin:-margin]*(resampled_data[cam][margin:-margin]-resampled_model[cam][margin+i:])**2)
+    i=np.argmin(chi2)-margin
+    z=10**(i*lstep)-1
+    #log.info("Best z=%f"%z)
+
+    normalized_flux={}
+    normalized_ivar={}
+    ndata=0
+    for cam in cameras :
+        tmp=applySmoothingFilter(flux[cam]) # this is fast
+        normalized_flux[cam] = flux[cam]/(tmp+(tmp==0))
+        normalized_ivar[cam] = ivar[cam]*tmp**2
+        # mask potential cosmics
+        ok=np.where(normalized_ivar[cam]>0)[0]
+        if ok.size>0 :
+            normalized_ivar[cam][ok] *= (normalized_flux[cam][ok]<1.+3/np.sqrt(normalized_ivar[cam][ok]))
+        ndata += np.sum(normalized_ivar[cam]>0)
 
 
-    rnorm=flux["r"]/applySmoothingFilter(flux["r"])
-    bnorm=flux["b"]/applySmoothingFilter(flux["b"])
-    znorm=flux["z"]/applySmoothingFilter(flux["z"])
 
 
-   # propagate this normalization to ivar
+    # now we go back to the model spectra , redshift them, resample, apply resolution, normalize and chi2 match
 
-    bivar=ivar["b"]*(applySmoothingFilter(flux["b"]))**2
-    rivar=ivar["r"]*(applySmoothingFilter(flux["r"]))**2
-    zivar=ivar["z"]*(applySmoothingFilter(flux["z"]))**2
+    nstars=stdflux.shape[0]
+    shifted_stdwave=stdwave/(1+z)
 
-    Chisq=1e100
-    bestId=-1
-    bchisq=0
-    rchisq=0
-    zchisq=0
+    func_args = []
+    # need to parallelize this
+    for star in range(nstars) :
+        arguments={"wave":wave,
+                   "normalized_flux":normalized_flux,
+                   "normalized_ivar":normalized_ivar,
+                   "resolution_data":resolution_data,
+                   "shifted_stdwave":shifted_stdwave,
+                   "star_stdflux":stdflux[star]}
+        func_args.append( arguments )
 
-    bmodels={}
-    rmodels={}
-    zmodels={}
-    for i,v in enumerate(stdflux):
-        bmodels[i]=rebinSpectra(v,stdwave,wave["b"])
-        rmodels[i]=rebinSpectra(v,stdwave,wave["r"])
-        zmodels[i]=rebinSpectra(v,stdwave,wave["z"])
+    if ncpu > 1:
+        log.debug("creating multiprocessing pool with %d cpus"%ncpu); sys.stdout.flush()
+        pool = multiprocessing.Pool(ncpu)
+        log.debug("Running pool.map() for {} items".format(len(func_args))); sys.stdout.flush()
+        model_chi2 =  pool.map(_func, func_args)
+        log.debug("Finished pool.map()"); sys.stdout.flush()
+        pool.close()
+        pool.join()
+        log.debug("Finished pool.join()"); sys.stdout.flush()
+    else:
+        log.debug("Not using multiprocessing for {} cpus".format(ncpu))
+        model_chi2 = [_func(x) for x in func_args]
+        log.debug("Finished serial loop over compute_chi2")
+        
+    best_model_id=np.argmin(np.array(model_chi2))
+    best_chi2=model_chi2[best_model_id]
+    log.debug("selected best model {} chi2/ndf {}".format(best_model_id, best_chi2/ndata))
+    # log.info("model star#%d chi2/ndf=%f best chi2/ndf=%f"%(star,chi2/ndata,best_chi2/ndata))
 
-    Models={"b":bmodels,"r":rmodels,"z":zmodels}
-
-    def convolveModel(wave,resolution,flux):
-
-        diags=np.arange(10,-11,-1)
-        nwave=len(wave)
-        convolved=np.zeros(nwave)
-        R=Resolution(resolution)
-        convolved=R.dot(flux)
-
-        return convolved
-
-    nstd=stdflux.shape[0]
-    nstdwave=stdwave.shape[0]
-    maxDelta=1e100
-    bestId=-1
-    red_Chisq=-1.
-
-    for i in range(nstd):
-
-        bconvolveFlux=convolveModel(wave["b"],resolution_data["b"],Models["b"][i])
-        rconvolveFlux=convolveModel(wave["r"],resolution_data["r"],Models["r"][i])
-        zconvolveFlux=convolveModel(wave["z"],resolution_data["z"],Models["z"][i])
-
-        b_models=bconvolveFlux/applySmoothingFilter(bconvolveFlux)
-        r_models=rconvolveFlux/applySmoothingFilter(rconvolveFlux)
-        z_models=zconvolveFlux/applySmoothingFilter(zconvolveFlux)
-
-        rdelta=np.sum(((r_models-rnorm)**2)*rivar)
-        bdelta=np.sum(((b_models-bnorm)**2)*bivar)
-        zdelta=np.sum(((z_models-znorm)**2)*zivar)
-        if (rdelta+bdelta+zdelta)<maxDelta:
-                bestmodel={"r":r_models,"b":b_models,"z":z_models}
-                bestId=i
-                maxDelta=(rdelta+bdelta+zdelta)
-                dof=len(wave["b"])+len(wave["r"])+len(wave["z"])
-                red_Chisq=maxDelta/dof
-
-    return bestId,stdwave,stdflux[bestId],red_Chisq
-    #Should we skip those stars with very bad Chisq?
+    return best_model_id,z,best_chi2/ndata
 
 
 def normalize_templates(stdwave, stdflux, mags, filters):
@@ -200,6 +293,16 @@ def compute_flux_calibration(frame, input_model_wave,input_model_flux,nsig_clipp
         - fit the mean throughput (deconvolved, this is needed because of sharp atmospheric absorption lines)
         - compute broad band correction to fibers (to correct for small mis-alignement for instance)
         - perform outlier rejection
+
+     There is one subtelty with the relation between calibration and resolution.
+      - The input frame flux is on average flux^frame_fiber = R_fiber*C*flux^true where C is the true calibration (or throughput)
+        which is a function of wavelength. This is the system we solve.
+      - But we want to return a calibration vector per fiber C_fiber defined by flux^cframe_fiber = flux^frame_fiber/C_fiber,
+        such that flux^cframe can be compared with a convolved model of the truth, flux^cframe_fiber = R_fiber*flux^true,
+        i.e. (R_fiber*C*flux^true)/C_fiber = R_fiber*true_flux, giving C_fiber = (R_fiber*C*flux^true)/(R_fiber*flux^true)
+      - There is no solution for this for all possible input specta. The solution for a flat spectrum is returned,
+        which is very close to C_fiber = R_fiber*C (but not exactly).
+
     """
 
     log=get_logger()
@@ -215,34 +318,34 @@ def compute_flux_calibration(frame, input_model_wave,input_model_flux,nsig_clipp
     nstds=stdstars.flux.shape[0]
 
     # resample model to data grid and convolve by resolution
-    model_flux=np.zeros((nstds, nwave))    
+    model_flux=np.zeros((nstds, nwave))
+    convolved_model_flux=np.zeros((nstds, nwave))
     for fiber in range(model_flux.shape[0]) :
         model_flux[fiber]=resample_flux(stdstars.wave,input_model_wave,input_model_flux[fiber])
-
-        # debug
-        # pylab.plot(input_model_wave,input_model_flux[fiber])
-        # pylab.plot(wave,model_flux[fiber],c="g")
-
-        model_flux[fiber]=stdstars.R[fiber].dot(model_flux[fiber])
-
-        # debug
-        # pylab.plot(wave,model_flux[fiber],c="r")
-        # pylab.show()
+        convolved_model_flux[fiber]=stdstars.R[fiber].dot(model_flux[fiber])
 
     # iterative fitting and clipping to get precise mean spectrum
     current_ivar=stdstars.ivar.copy()
 
     #- Start with a first pass median rejection
-    median_calib = np.median(stdstars.flux / model_flux, axis=0)
-    chi2 = stdstars.ivar * (stdstars.flux - model_flux*median_calib)**2
+    median_calib = np.median(stdstars.flux / convolved_model_flux, axis=0)
+    chi2 = stdstars.ivar * (stdstars.flux - convolved_model_flux*median_calib)**2
     bad=(chi2>nsig_clipping**2)
     current_ivar[bad] = 0
 
     smooth_fiber_correction=np.ones((stdstars.flux.shape))
     chi2=np.zeros((stdstars.flux.shape))
 
-    sqrtwmodel=np.sqrt(current_ivar)*model_flux
+    # chi2 = sum w ( data_flux - R*(calib*model_flux))**2
+    # chi2 = sum (sqrtw*data_flux -diag(sqrtw)*R*diag(model_flux)*calib)
+
+    sqrtw=np.sqrt(current_ivar)
+    #sqrtwmodel=np.sqrt(current_ivar)*convolved_model_flux # used only for QA
     sqrtwflux=np.sqrt(current_ivar)*stdstars.flux
+
+    # diagonal sparse matrices
+    D1=scipy.sparse.lil_matrix((nwave,nwave))
+    D2=scipy.sparse.lil_matrix((nwave,nwave))
 
     # test
     # nstds=20
@@ -253,9 +356,6 @@ def compute_flux_calibration(frame, input_model_wave,input_model_flux,nsig_clipp
         A=scipy.sparse.lil_matrix((nwave,nwave)).tocsr()
         B=np.zeros((nwave))
 
-        # diagonal sparse matrix with content = sqrt(ivar)*flat of a given fiber
-        SD=scipy.sparse.lil_matrix((nwave,nwave))
-
         # loop on fiber to handle resolution
         for fiber in range(nstds) :
             if fiber%10==0 :
@@ -264,9 +364,9 @@ def compute_flux_calibration(frame, input_model_wave,input_model_flux,nsig_clipp
             R = stdstars.R[fiber]
 
             # diagonal sparse matrix with content = sqrt(ivar)*flat
-            SD.setdiag(sqrtwmodel[fiber])
-
-            sqrtwmodelR = SD*R # each row r of R is multiplied by sqrtwmodel[r]
+            D1.setdiag(sqrtw[fiber]*smooth_fiber_correction[fiber])
+            D2.setdiag(model_flux[fiber])
+            sqrtwmodelR = D1.dot(R.dot(D2)) # chi2 = sum (sqrtw*data_flux -diag(sqrtw)*smooth_fiber_correction*R*diag(model_flux)*calib )
 
             A = A+(sqrtwmodelR.T*sqrtwmodelR).tocsr()
             B += sqrtwmodelR.T*sqrtwflux[fiber]
@@ -285,33 +385,15 @@ def compute_flux_calibration(frame, input_model_wave,input_model_flux,nsig_clipp
 
         log.info("iter %d fit smooth correction per fiber"%iteration)
         # fit smooth fiberflat and compute chi2
-        smoothing_res=1000. #A
-
         for fiber in range(nstds) :
             if fiber%10==0 :
                 log.info("iter %d fiber %d(smooth)"%(iteration,fiber))
 
-            R = stdstars.R[fiber]
+            M = stdstars.R[fiber].dot(calibration*model_flux[fiber])
 
-            #M = np.array(np.dot(R.todense(),mean_spectrum)).flatten()
-            M = R.dot(calibration)*model_flux[fiber]
-
-            #debug
-            #pylab.plot(wave,flux[fiber],c="b")
-            #pylab.plot(wave,M,c="r")
-            #pylab.show()
-            #continue
-
-            F = stdstars.flux[fiber]/(M+(M==0))
-            smooth_fiber_correction[fiber]=spline_fit(stdstars.wave,stdstars.wave,F,smoothing_res,current_ivar[fiber]*(M!=0))
+            pol=np.poly1d(np.polyfit(stdstars.wave,stdstars.flux[fiber]/(M+(M==0)),deg=1,w=current_ivar[fiber]*M**2))
+            smooth_fiber_correction[fiber]=pol(stdstars.wave)
             chi2[fiber]=current_ivar[fiber]*(stdstars.flux[fiber]-smooth_fiber_correction[fiber]*M)**2
-
-            #pylab.plot(wave,F)
-            #pylab.plot(wave,smooth_fiber_correction[fiber])
-
-        #pylab.show()
-        #sys.exit(12)
-
 
         log.info("iter {0:d} rejecting".format(iteration))
 
@@ -325,7 +407,8 @@ def compute_flux_calibration(frame, input_model_wave,input_model_flux,nsig_clipp
             for i in selection :
                 worst_entry=np.argmax(chi2[:,i])
                 current_ivar[worst_entry,i]=0
-                sqrtwmodel[worst_entry,i]=0
+                sqrtw[worst_entry,i]=0
+                #sqrtwmodel[worst_entry,i]=0
                 sqrtwflux[worst_entry,i]=0
                 nout_iter += 1
 
@@ -333,28 +416,31 @@ def compute_flux_calibration(frame, input_model_wave,input_model_flux,nsig_clipp
             # remove all of them at once
             bad=(chi2>nsig_clipping**2)
             current_ivar *= (bad==0)
-            sqrtwmodel *= (bad==0)
+            sqrtw *= (bad==0)
+            #sqrtwmodel *= (bad==0)
             sqrtwflux *= (bad==0)
             nout_iter += np.sum(bad)
 
         nout_tot += nout_iter
 
         sum_chi2=float(np.sum(chi2))
-        ndf=int(np.sum(chi2>0)-nwave-nstds*(nwave/smoothing_res))
+        ndf=int(np.sum(chi2>0)-nwave-nstds*2)
         chi2pdf=0.
         if ndf>0 :
             chi2pdf=sum_chi2/ndf
 
         # normalize to get a mean fiberflat=1
         mean=np.nanmean(smooth_fiber_correction,axis=0)
-        sv_smooth = smooth_fiber_correction
-        smooth_fiber_correction = smooth_fiber_correction/mean
-        calibration *= mean
+        smooth_fiber_correction /= mean
 
         log.info("iter #%d chi2=%f ndf=%d chi2pdf=%f nout=%d mean=%f"%(iteration,sum_chi2,ndf,chi2pdf,nout_iter,np.mean(mean)))
 
-        if nout_iter == 0 :
+        if nout_iter == 0 and np.max(np.abs(mean-1))<0.005 :
             break
+
+    # smooth_fiber_correction does not converge exactly to one on average, so we apply its mean to the calibration
+    # (tested on sims)
+    calibration /= mean
 
     log.info("nout tot=%d"%nout_tot)
 
@@ -369,14 +455,14 @@ def compute_flux_calibration(frame, input_model_wave,input_model_flux,nsig_clipp
     calibvar *= mean**2
     calibivar=(calibvar>0)/(calibvar+(calibvar==0))
 
-    # we also want to save the convolved calibration and calibration variance
+    # we also want to save the convolved calibration and a calibration variance
     # first compute average resolution
     mean_res_data=np.mean(frame.resolution_data,axis=0)
     R = Resolution(mean_res_data)
     # compute convolved calib
     ccalibration = np.zeros(frame.flux.shape)
     for i in range(frame.nspec):
-        ccalibration[i]=frame.R[i].dot(calibration)
+        ccalibration[i]=frame.R[i].dot(calibration)/frame.R[i].dot(np.ones(calibration.shape))
 
     # Use diagonal of mean calibration covariance for output.
     ccalibcovar=R.dot(calibcovar).dot(R.T.todense())
@@ -394,8 +480,8 @@ def compute_flux_calibration(frame, input_model_wave,input_model_flux,nsig_clipp
     mask = (ccalibivar==0).astype(np.int32)
 
     # return calibration, calibivar, mask, ccalibration, ccalibivar
-    return FluxCalib(stdstars.wave, ccalibration, ccalibivar, mask, R.dot(calibration)), (
-        sqrtwmodel, sqrtwflux, current_ivar, chi2)
+    return FluxCalib(stdstars.wave, ccalibration, ccalibivar, mask, R.dot(calibration))\
+        #, (sqrtwmodel, sqrtwflux, current_ivar, chi2)
 
 
 
@@ -413,8 +499,8 @@ class FluxCalib(object):
         All arguments become attributes, plus nspec,nwave = calib.shape
 
         The calib vector should be such that
-        
-            [erg/s/cm^2/A] = [photons/A] / calib
+
+            [1e-17 erg/s/cm^2/A] = [photons/A] / calib
         """
         assert wave.ndim == 1
         assert calib.ndim == 2
@@ -426,7 +512,7 @@ class FluxCalib(object):
         self.wave = wave
         self.calib = calib
         self.ivar = ivar
-        self.mask = mask
+        self.mask = util.mask32(mask)
         self.meancalib = meancalib
 
 def apply_flux_calibration(frame, fluxcalib):
@@ -436,7 +522,7 @@ def apply_flux_calibration(frame, fluxcalib):
     Args:
         frame: Spectra object with attributes wave, flux, ivar, resolution_data
         fluxcalib : FluxCalib object with wave, calib, ...
-        
+
     Modifies frame.flux and frame.ivar
     """
     log=get_logger()
@@ -467,6 +553,7 @@ def apply_flux_calibration(frame, fluxcalib):
     frame.flux = frame.flux * (C>0) / (C+(C==0))
     frame.ivar = (frame.ivar>0) * (fluxcalib.ivar>0) * (C>0) / (1./((frame.ivar+(frame.ivar==0))*(C**2+(C==0))) + frame.flux**2/(fluxcalib.ivar*C**4+(fluxcalib.ivar*(C==0)))   )
 
+
 def ZP_from_calib(wave, calib):
     """ Calculate the ZP in AB magnitudes given the calibration and the wavelength arrays
     Args:
@@ -477,19 +564,23 @@ def ZP_from_calib(wave, calib):
       ZP_AB: 1D array of ZP values in AB magnitudes
 
     """
-    ZP_flambda = 1. / calib  # erg/s/cm^2/A
+    ZP_flambda = 1e-17 / calib  # erg/s/cm^2/A
     ZP_fnu = ZP_flambda * wave**2 / (2.9979e18)  # c in A/s
-    ZP_AB = -2.5 * np.log10(ZP_fnu) - 48.6
+    # Avoid 0 values
+    ZP_AB = np.zeros_like(ZP_fnu)
+    gdZ = ZP_fnu > 0.
+    ZP_AB[gdZ] = -2.5 * np.log10(ZP_fnu[gdZ]) - 48.6
     # Return
     return ZP_AB
 
-def qa_fluxcalib(param, frame, fluxcalib, indiv_stars):
+
+def qa_fluxcalib(param, frame, fluxcalib, model_tuple):#, indiv_stars):
     """
     Args:
         param: dict of QA parameters
         frame: Frame
         fluxcalib: FluxCalib
-        indiv_stars : tuple of data on individual star fibers
+        model_tuple : tuple of model data for standard stars (read from stdstars-...fits)
 
     Returns:
         qadict: dict of QA outputs
@@ -497,43 +588,58 @@ def qa_fluxcalib(param, frame, fluxcalib, indiv_stars):
 
     """
     log = get_logger()
-
     qadict = {}
 
+    # Unpack model
+    #input_model_flux,input_model_wave,input_model_fibers=model_tuple
+
+    # Standard stars
+    stdfibers = (frame.fibermap['OBJTYPE'] == 'STD')
+    stdstars = frame[stdfibers]
+    nstds = np.sum(stdfibers)
+    #try:
+    #    assert np.array_equal(frame.fibers[stdfibers], input_model_fibers)
+    #except AssertionError:
+    #    log.error("Bad indexing in standard stars")
+
     # Calculate ZP for mean spectrum
-    ZP_AB = ZP_from_calib(fluxcalib.wave, fluxcalib.meancalib)  # erg/s/cm^2/A
+    #medcalib = np.median(fluxcalib.calib,axis=0)
+    medcalib = np.median(fluxcalib.calib[stdfibers],axis=0)
+    ZP_AB = ZP_from_calib(fluxcalib.wave, medcalib)  # erg/s/cm^2/A
 
     # ZP at fiducial wavelength (AB mag for 1 photon/s/A)
     iZP = np.argmin(np.abs(fluxcalib.wave-param['ZP_WAVE']))
     qadict['ZP'] = float(np.median(ZP_AB[iZP-10:iZP+10]))
 
     # Unpack star data
-    sqrtwmodel, sqrtwflux, current_ivar, chi2 = indiv_stars
+    #sqrtwmodel, sqrtwflux, current_ivar, chi2 = indiv_stars
 
     # RMS
-    nstars = sqrtwflux.shape[0]
-    qadict['NSTARS_FIBER'] = int(nstars)
-    ZP_stars = np.zeros_like(sqrtwflux)
-    ZP_fiducial = np.zeros(nstars)
-    for ii in range(nstars):
+    qadict['NSTARS_FIBER'] = int(nstds)
+    ZP_fiducial = np.zeros(nstds)
+    for ii in range(nstds):
+        # Model flux
+        #model_flux=resample_flux(stdstars.wave,input_model_wave,input_model_flux[ii])
+        #convolved_model_flux=stdstars.R[ii].dot(model_flux)
         # Good pixels
-        gdp = current_ivar[ii, :] > 0.
-        icalib = sqrtwflux[ii, gdp] / sqrtwmodel[ii, gdp]
+        gdp = stdstars.ivar[ii, :] > 0.
+        #icalib = stdstars.flux[ii, gdp] / convolved_model_flux[gdp]
+        icalib = fluxcalib.calib[stdfibers[ii]]
         i_wave = fluxcalib.wave[gdp]
         ZP_stars = ZP_from_calib(i_wave, icalib)
         iZP = np.argmin(np.abs(i_wave-param['ZP_WAVE']))
         ZP_fiducial[ii] = float(np.median(ZP_stars[iZP-10:iZP+10]))
+    #import pdb; pdb.set_trace()
     qadict['RMS_ZP'] = float(np.std(ZP_fiducial))
 
     # MAX ZP Offset
-    stdfibers = np.where(frame.fibermap['OBJTYPE'] == 'STD')[0]
-    ZPoffset = np.abs(ZP_fiducial-qadict['ZP'])
-    qadict['MAX_ZP_OFF'] = [float(np.max(ZPoffset)),
+    #stdfibers = np.where(frame.fibermap['OBJTYPE'] == 'STD')[0]
+    ZPoffset = ZP_fiducial-qadict['ZP']
+    imax = np.argmax(np.abs(ZPoffset))
+    qadict['MAX_ZP_OFF'] = [float(ZPoffset[imax]),
                             int(stdfibers[np.argmax(ZPoffset)])]
     if qadict['MAX_ZP_OFF'] > param['MAX_ZP_OFF']:
         log.warn("Bad standard star ZP {:g}, in fiber {:d}".format(
                 qadict['MAX_ZP_OFF'][0], qadict['MAX_ZP_OFF'][1]))
-
     # Return
     return qadict
-

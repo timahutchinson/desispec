@@ -3,15 +3,16 @@ boxcar extraction for Spectra from Desi Image
 """
 import numpy as np
 
-def do_boxcar(image,psf,boxwidth=2.5,dw=0.5,nspec=500):
-    """
-    Extracts spectra row by row, given the centroids  
-    Args:  
-         image  : desispec.image object 
-         psf: desispec.psf.PSF like object
-              Or do we just parse the traces here and write a separate wrapper to handle this? Leaving psf in the input argument now.           
-         boxwidth: HW box size in pixels
-         dw: constant wavelength grid spacing in the output spectra 
+def do_boxcar(image,psf,outwave,boxwidth=2.5,nspec=500):
+    """Extracts spectra row by row, given the centroids
+
+    Args:
+        image  : desispec.image object
+        psf: desispec.psf.PSF like object
+            Or do we just parse the traces here and write a separate wrapper to handle this? Leaving psf in the input argument now.
+        outwave: wavelength array for the final spectra output
+        boxwidth: HW box size in pixels
+
     Returns desispec.frame.Frame object
     """
     import math
@@ -22,7 +23,7 @@ def do_boxcar(image,psf,boxwidth=2.5,dw=0.5,nspec=500):
     wmax=psf.wmax
     waves=np.arange(wmin,wmax,0.25)
     xs=psf.x(None,waves) #- xtraces # doing the full image here.
-    ys=psf.y(None,waves) #- ytraces 
+    ys=psf.y(None,waves) #- ytraces
 
     camera=image.camera
     spectrograph=int(camera[1:]) #- first char is "r", "b", or "z"
@@ -36,8 +37,8 @@ def do_boxcar(image,psf,boxwidth=2.5,dw=0.5,nspec=500):
         for spec in xrange(0,xs.shape[0]):
             xpos=xs[spec][bin]
             ypos=int(ys[spec][bin])
-            if xpos<0 or xpos>maxx or ypos<0 or ypos>maxy : 
-                continue 
+            if xpos<0 or xpos>maxx or ypos<0 or ypos>maxy :
+                continue
             xmin=xpos-boxwidth
             xmax=xpos+boxwidth
             ixmin=int(math.floor(xmin))
@@ -71,7 +72,7 @@ def do_boxcar(image,psf,boxwidth=2.5,dw=0.5,nspec=500):
             if  ranges[ypos][sp]==0:
                 ranges[ypos][sp]=lastval
             lastval=ranges[ypos][sp]
-    
+
 
     maskedimg=(image.pix*mask.T)
     flux=np.zeros((maskedimg.shape[0],ranges.shape[1]-1))
@@ -81,18 +82,27 @@ def do_boxcar(image,psf,boxwidth=2.5,dw=0.5,nspec=500):
 
     from desispec.interpolation import resample_flux
 
-    wtarget=np.arange(wmin,wmax+dw/2.0,dw) #- using same wmin and wmax.
-    fflux=np.zeros((500,len(wtarget)))
-    ivar=np.zeros((500,len(wtarget)))
-    resolution=np.zeros((500,21,len(wtarget))) #- placeholder for online case. Offline should be usable
+    wtarget=outwave
+    #- limit nspec to psf.nspec max
+    if nspec > psf.nspec:
+        nspec=psf.nspec
+        print "Warning! Extracting only %s spectra"%psf.nspec
+
+    fflux=np.zeros((nspec,len(wtarget)))
+    ivar=np.zeros((nspec,len(wtarget)))
+    resolution=np.zeros((nspec,21,len(wtarget))) #- placeholder for online case. Offline should be usable
     #TODO get the approximate resolution matrix for online purpose or don't need them? How to perform fiberflat, sky subtraction etc or should have different version of them for online?
-    for spec in xrange(flux.shape[1]):
+
+    #- convert to per angstrom first and then resample to desired wave length grid.
+
+    for spec in xrange(nspec):
         ww=psf.wavelength(spec)
+        dwave=np.gradient(ww)
+        flux[:,spec]/=dwave
         fflux[spec,:]=resample_flux(wtarget,ww,flux[:,spec])
-        ivar[spec,:]=1./(fflux[spec,:].clip(0.0)+image.readnoise) #- taking only positive pixel counts
-    dwave=np.gradient(wtarget)
-    fflux/=dwave
-    ivar*=dwave**2
-    #- Extracted the full image but write frame in [nspec,nwave]
-    #- return a desispec.frame object
-    return Frame(wtarget,fflux[:nspec],ivar[:nspec],resolution_data=resolution[:nspec],spectrograph=spectrograph)
+        #- image.readnoise is no more a scalar but a full CCD pixel size array
+        #- TODO Using median readnoise here for now. Need to propagate per-pixel readnoise from top.
+        readnoise=np.median(image.readnoise)
+        ivar[spec,:]=1./(fflux[spec,:].clip(0.0)+2*boxwidth*readnoise**2)#- 2*half width=boxsize
+
+    return fflux,ivar,resolution
